@@ -13,6 +13,18 @@ right vessel class, and price the cargo all the way to the godown.
 
 Two processes: Flask on **5000**, Vite on **5173**.
 
+### Both at once
+
+```bash
+./start_dev.sh                     # or: cd frontend && npm run dev:full
+```
+
+It creates the backend virtualenv if missing, installs requirements, copies the
+trained freight models out of `../ML` into `backend/app/ml_models/` on first run,
+steps past a busy port, and starts Flask and Vite together with the frontend
+already pointed at the API. `Ctrl-C` stops both. `--backend` / `--frontend` run
+one side only.
+
 ### Backend
 
 ```bash
@@ -98,14 +110,21 @@ The whole scene is laid out in a fixed 1280×720 coordinate space
 container land exactly on the stack at any screen size. `prefers-reduced-motion`
 skips the choreography and renders the final composition.
 
-### Module 2 — Dashboard
+### Module 2 — Sourcing dashboard
 
-| Tab | Contents |
-|-----|----------|
-| **KPI Overview** | Live Baltic indices, active vessels in transit, average port dwell, landed cost delta, bunker price, fleet idle time · index board · fleet telemetry · congestion bars · risk feed |
-| **Route Optimization** | Origin/destination selector, speed-vs-fuel optimiser (cube law), port constraint check, ranked vessel-class comparison, berth availability windows, full port × class constraint map |
-| **Freight Predictor** | 90d/180d/1y history with a 30/60/90-day forecast and 95% confidence cone, procurement calendar scored FIX/WATCH/AVOID, and a 14-lane rate matrix |
-| **Landed Cost** | Full cost stack (FOB → freight → insurance → duty → handling → demurrage → inland → holding → interest → stockout), inventory cover position, and an optimal-parcel-size sweep |
+One screen, no tab stack: controls on the left, the decision on the right.
+
+| Region | Contents |
+|---|---|
+| **Control rail** | Destination steel plant (SAIL Rourkela / SAIL Bokaro / RINL Vizag), order volume, vessel class, macro stress-test sliders (Brent crude shock %, VLSFO bunker $/MT, USD/INR, BDRY index), Virtual Arrival toggle, 14/30-day forecast horizon |
+| **Tactical banner** | The procurement call — ADVANCE SPOT CHARTER BOOKINGS / STAGGER CHARTER CONTRACTS / DEFER FIXTURES, driven by the model's projected move |
+| **Metrics bar** | Live BDRY with its 14/30-day target, Brent crude $/bbl, VLSFO bunker $/MT, USD/INR |
+| **Optimal sourcing plan** | Every feasible origin × discharge-port routing, ranked and priced to the plant: supplier origin, discharge port, allocated volume, ocean / port / FOIS rail legs, landed ₹/MT, premium over rank 1 |
+| **Multi-modal cost stack** | The allocated routing split into FOB, ocean freight, grade adjustment, port handling, demurrage, rail and godown, in ₹/MT |
+| **Financial ledger** | Procurement budget in ₹ crores, saving against the costliest feasible routing, and what Virtual Arrival is worth |
+| **Freight index forecast** | Realised BDRY flowing into the 14- or 30-day model curve with its 95% cone and the optimal charter window |
+
+Slider moves re-post the whole scenario, so every panel updates together.
 
 ---
 
@@ -116,79 +135,136 @@ app adds the headers itself.
 
 | Method | Route | Purpose |
 |---|---|---|
-| GET | `/api/health` | Service + database status |
-| GET | `/api/kpis` | Dashboard KPI tiles |
-| GET | `/api/indices` | Baltic indices and bunker price |
-| GET | `/api/ports` | Discharge and load ports with constraint envelopes |
-| GET | `/api/vessel-classes` | Handysize → Capesize particulars |
-| GET | `/api/routes` | The 14 trade lanes |
-| GET | `/api/vessels?count=` | Live fleet telemetry |
-| GET | `/api/congestion` | Queue depth and berth occupancy |
-| GET | `/api/alerts` | Congestion and laycan risk warnings |
-| GET | `/api/berths?port=&days=` | Forward berth window plan |
-| GET | `/api/freight/history?route=&days=` | Historical spot rates |
-| GET | `/api/freight/forecast?route=&horizon=` | Forecast with confidence band |
-| GET | `/api/freight/matrix` | Every lane: spot, 30-day move, signal |
-| GET | `/api/freight/timing?route=&horizon=` | Weekly procurement calendar |
-| GET | `/api/optimize/constraints` | Port × vessel-class feasibility grid |
-| GET | `/api/optimize/feasibility?port=&vessel_class=` | Single berthing check |
-| POST | `/api/optimize/voyage` | Speed/fuel optimisation + class ranking |
-| POST | `/api/cost/landed` | Landed cost stack + optimal parcel size |
+| GET | `/api/health` | Service, database and ML model status |
+| GET | `/api/steel/options` | Plants, ports, vessel classes, origins, macro baseline, slider ranges |
+| POST | `/api/steel/plan` | **The optimiser** — ranked routings, allocation, ledger and forecast |
+| POST | `/api/predict/freight` | **ML** 14/30-day BDRY forecast: level, band, drivers, curve |
+| GET | `/api/predict/status` | Model health for the dashboard badge |
 | POST | `/api/auth/register` · `/api/auth/login` · GET `/api/auth/me` | Session |
 
-### The models behind the numbers
+### The sourcing optimiser
 
-- **Freight series** — mean-reverting (Ornstein–Uhlenbeck style) around a
-  seasonal anchor with two humps: pre-monsoon coal stocking and the post-monsoon
-  restock. Congestion shocks decay over about a fortnight.
-- **Forecast** — momentum from the 10/45-day moving-average spread, decaying over
-  ~3 weeks into mean reversion, with a 95% cone widening as √t.
-- **Speed optimisation** — propulsion consumption scales with the *cube* of
-  speed; auxiliaries do not. Total cost = bunkers + charter hire + port charges +
-  demurrage, swept across the class's practical speed band.
-- **Port feasibility** — draft plus under-keel clearance (10% or 1.0 m, whichever
-  is larger) against berth draft, with cargo derated by tonnes-per-centimetre
-  immersion (TPC ≈ 3.77 · dwt^⅔, fitted to Handysize ≈ 38, Panamax ≈ 68,
-  Capesize ≈ 120 t/cm). LOA and beam are hard gates.
-- **Landed cost** — the full CIF-to-godown stack, plus working-capital interest
-  on inventory and a stockout penalty when stock cover falls short of the
-  replenishment lead time.
+`ML/app.py` states the allocation as
 
-Generators are seeded off a stable key, so the same lane produces the same
-history on every reload while vessel positions and index ticks advance with the
-clock.
+```
+minimise  sum_r  x_r * landed_cost_r
+s.t.      sum_r  x_r = demand,   x_r >= 0
+```
+
+with no per-route capacity. That program is degenerate — its optimum puts the
+whole requirement on the single cheapest feasible routing — so `steel_engine.py`
+computes that closed form directly and gets an identical answer without taking on
+a solver dependency. Every rejected routing is still priced and ranked, so the
+desk sees what was passed over and by how much.
+
+Cost stack, per tonne:
+
+```
+  FOB cargo
++ ocean freight        supplier base x vessel scale factor x freight index
++ coal grade adjustment
++ port tariff
++ demurrage            only when steaming full ahead into a queue
++ extra charter hire   only when slow-steaming through that queue
+- bunker saved         only when slow-steaming
+= ocean USD/t  ->  x USD/INR
++ FOIS rail INR/t
++ plant godown INR/t
+= landed INR/t
+```
+
+Feasibility is a hard gate on vessel draft against berth draft and on DWT against
+the port's maximum call size — which is why Capesize clears only Dhamra and
+Vizag, and Haldia's river draft accepts nothing above Supramax.
+
+**Virtual Arrival** is the toggle that matters: steaming full ahead into a queue
+pays demurrage at the port's day rate spread over the parcel, while slow-steaming
+pays extra charter hire instead but saves the bunker difference across the whole
+passage. The ledger prices the plan both ways and reports the delta.
+
+### The trained freight models
+
+`POST /api/predict/freight` is served by two `HistGradientBoostingRegressor`s
+trained in the sibling **ML** project and shipped in `backend/app/ml_models/`:
+
+| Artefact | Horizon | Out-of-sample price-level R² |
+|---|---|---|
+| `freight_forecast_14d.pkl` | 14 days | 0.706 |
+| `freight_forecast_30d.pkl` | 30 days | 0.612 |
+| `feature_columns.pkl` | — | the nine feature names, in training order |
+
+They do **not** predict a price level — they predict the *delta*
+`BDRY(t+h) − BDRY(t)`, from nine stationary features rebuilt at inference time by
+`services/ml_engine.py` from the BDRY freight index, Brent crude and USD/INR:
+
+```
+BDRY_P_Diff_1 / _5 / _14     price change over 1, 5, 14 sessions
+BDRY_EMA_7 / _21             EMA minus spot — distance from its own trend
+Crude_P_Diff_7               Brent 7-session move
+Crude_EMA_14                 Brent EMA minus spot
+USDINR_Diff_7                rupee 7-session move
+Rolling_Vol_14               14-session std-dev of daily BDRY changes
+```
+
+The index delta is then rebased onto the selected lane's USD/tonne spot, which is
+what a charterer actually fixes against.
+
+- **Scenario sliders** — a bunker or FX shock is phased into the tail of the
+  macro series over three weeks rather than applied as a step, so the difference
+  and EMA features see a move of the shape they were trained on. Berth congestion
+  is priced on top of the model rather than fed into it.
+- **Confidence band** — a random walk's h-day sigma is `vol·√h`; the model
+  explains R² of that variance, so the cone is `√(1−R²)` of the naive spread
+  rather than an arbitrary constant.
+- **Explainability** — each driver bar is an ablation: replace one feature with
+  its historical median, re-predict, and read off what the live value was worth.
+- **Graceful fallback** — a missing pickle, a missing CSV, an absent
+  scikit-learn or a missing request field all degrade to a deterministic analytic
+  forecast of the *identical* response shape, flagged in the model badge. The
+  browser mirror in `fallback.js` reproduces the same feature recipe, so the tab
+  renders identically with Flask stopped.
 
 ---
 
 ## Offline behaviour
 
-Every dashboard request goes through `fetchOrFallback`. If Flask is unreachable
-the same generators run in the browser (`src/lib/fallback.js`) and each panel
-badges itself **DEMO** instead of **LIVE**, so a demo never shows an empty chart.
+Every dashboard request goes through `fetchOrFallback`. If Flask is unreachable,
+`src/lib/fallback.js` recomputes the same answer in the browser — the reference
+data is identical to `domain.py` and the cost stack reproduces `steel_engine.py`
+line for line, so the rupee figures match and every panel keeps working. Each
+panel badges its source **DEMO** instead of **LIVE**.
+
+The one thing that cannot be mirrored is the trained model: the pickles do not
+run in the browser, so the forecast falls back to the same analytic estimator the
+Python service uses when scikit-learn is absent, and the model badge says so.
+Response shapes are kept identical between the two paths.
 
 ---
 
 ## Layout
 
 ```
+start_dev.sh                one command for backend + frontend
 backend/
   run.py                    entry point, port preflight
   requirements.txt
   app/
-    __init__.py             application factory + CORS
+    __init__.py             application factory, CORS, model warm-up
     config.py               MONGO_URI lives here (left empty)
     db.py                   Mongo access with an in-memory fallback
-    domain.py               ports, vessel classes, trade lanes, indices
-    routes/                 auth · market · ops · optimize blueprints
+    domain.py               plants, ports, FOIS rail legs, vessels, origins
+    ml_models/              trained .pkl models + the training feature CSV
+    routes/                 auth · steel · predict blueprints
     services/
-      mockdata.py           seeded generators
-      engine.py             feasibility, voyage optimiser, landed cost
+      steel_engine.py       routing economics, allocation, ledger
+      ml_engine.py          model loading, feature recipe, index forecast
       auth.py               PBKDF2 credentials + signed session tokens
 frontend/
   src/
     lib/                    api client, offline mirror, hooks, formatting, scene
     components/landing/     Navbar · ScrollStage · ShipScene · About · Footer
-    components/dashboard/   ui primitives + the four tabs
+    components/dashboard/   ui primitives · ControlPanel · MetricsBar ·
+                            SourcingPlan · CostBreakdown · Ledger · ForecastPanel
     pages/                  Landing · AuthPage · Dashboard
 ```
 

@@ -7,6 +7,7 @@ from flask import Flask, jsonify
 from . import config
 from .db import db_status, init_db
 from .routes import BLUEPRINTS
+from .services import ml_engine
 
 
 def _install_cors(app):
@@ -41,6 +42,10 @@ def create_app():
     _install_cors(app)
     init_db()
 
+    # Pull the freight models into memory now rather than on the first request.
+    # A load failure is not fatal — ml_engine falls back to its analytic model.
+    app.config["ML_STATUS"] = ml_engine.warm_up()
+
     for bp in BLUEPRINTS:
         app.register_blueprint(bp)
 
@@ -54,6 +59,7 @@ def create_app():
             "version": "1.0.0",
             "time": datetime.now(timezone.utc).isoformat(),
             "database": db_status(),
+            "ml": app.config.get("ML_STATUS", {}),
         })
 
     @app.get("/")

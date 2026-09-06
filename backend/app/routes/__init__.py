@@ -1,8 +1,7 @@
 """Blueprint registry."""
 
 from .auth_routes import auth_bp
-from .market_routes import market_bp
-from .ops_routes import ops_bp
-from .optimize_routes import optimize_bp
+from .predict_routes import predict_bp
+from .steel_routes import steel_bp
 
-BLUEPRINTS = (auth_bp, market_bp, ops_bp, optimize_bp)
+BLUEPRINTS = (auth_bp, steel_bp, predict_bp)

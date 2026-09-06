@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:full": "bash ../start_dev.sh",
+    "dev:api": "bash ../start_dev.sh --backend",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"

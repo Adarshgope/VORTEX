@@ -1,13 +1,14 @@
 """
 Mongo access layer with a transparent in-memory fallback.
 
-If MONGO_URI in config.py is empty (or the server is unreachable) every
+If MONGO_URI is empty (or the server is unreachable) every
 collection call is served by a dict-backed shim with the same tiny surface the
 app uses -- find_one / insert_one / update_one / find / count_documents. Drop
-your Atlas URI into config.MONGO_URI and the real driver takes over with no
+your Atlas URI into backend/.env and the real driver takes over with no
 other code change.
 """
 
+import sys
 import threading
 from datetime import datetime, timezone
 
@@ -76,30 +77,47 @@ class _MemoryDB:
         return self[name]
 
 
+def _fall_back(detail):
+    """Serve everything from the dict shim, but say loudly why."""
+    global _db, _status
+    _db = _MemoryDB()
+    _status = {"connected": False, "backend": "memory", "detail": detail}
+    print(f"  [db] {detail}", file=sys.stderr)
+    return _db
+
+
 def init_db():
     """Connect to Atlas if a URI is present; otherwise stay in memory."""
     global _client, _db, _status
 
     if not config.MONGO_URI:
-        _db = _MemoryDB()
-        _status = {"connected": False, "backend": "memory",
-                   "detail": "MONGO_URI is empty — running on the in-memory store"}
-        return _db
+        return _fall_back("MONGO_URI is empty — running on the in-memory store")
+
+    if "<db_password>" in config.MONGO_URI:
+        return _fall_back(
+            "MONGO_URI still contains the literal <db_password> placeholder — "
+            "set MONGO_PASSWORD in backend/.env; using in-memory store"
+        )
 
     try:
         from pymongo import MongoClient
-        from pymongo.errors import PyMongoError
 
-        _client = MongoClient(config.MONGO_URI, serverSelectionTimeoutMS=4000)
+        _client = MongoClient(config.MONGO_URI, serverSelectionTimeoutMS=8000)
         _client.admin.command("ping")
         _db = _client[config.MONGO_DB_NAME]
-        _db["users"].create_index("email", unique=True)
-        _status = {"connected": True, "backend": "mongodb",
-                   "detail": f"Connected to database '{config.MONGO_DB_NAME}'"}
+        _db[config.MONGO_USERS_COLLECTION].create_index("email", unique=True)
+        _status = {
+            "connected": True,
+            "backend": "mongodb",
+            "detail": (f"Connected to '{config.MONGO_DB_NAME}."
+                       f"{config.MONGO_USERS_COLLECTION}'"),
+            "database": config.MONGO_DB_NAME,
+            "collection": config.MONGO_USERS_COLLECTION,
+        }
     except Exception as exc:  # driver missing, bad URI, network, auth
-        _db = _MemoryDB()
-        _status = {"connected": False, "backend": "memory",
-                   "detail": f"Mongo unavailable ({type(exc).__name__}) — using in-memory store"}
+        return _fall_back(
+            f"Mongo unavailable ({type(exc).__name__}: {exc}) — using in-memory store"
+        )
 
     return _db
 

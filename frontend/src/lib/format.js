@@ -17,6 +17,23 @@ export const usdCompact = (n) => {
   return `$${n.toFixed(0)}`;
 };
 
+/** Rupee amounts. Indian grouping (12,34,567) is what a plant desk reads. */
+export const inr = (n, digits = 0) =>
+  n == null || Number.isNaN(n)
+    ? "—"
+    : `₹${Number(n).toLocaleString("en-IN", {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      })}`;
+
+/** Crores — the unit a procurement budget is actually signed off in. */
+export const crore = (n, digits = 2) =>
+  n == null || Number.isNaN(n) ? "—" : `₹${Number(n).toFixed(digits)} Cr`;
+
+/** Metric tonnes, Indian grouping. */
+export const mt = (n) =>
+  n == null ? "—" : `${Number(n).toLocaleString("en-IN", { maximumFractionDigits: 0 })} MT`;
+
 export const tonnes = (n) =>
   n == null ? "—" : `${Number(n).toLocaleString("en-US", { maximumFractionDigits: 0 })} t`;
 

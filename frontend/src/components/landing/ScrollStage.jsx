@@ -13,7 +13,7 @@
  */
 
 import { useLayoutEffect, useRef, useState } from "react";
-import { ChevronDown, Waves as WavesIcon } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import ShipScene from "./ShipScene";

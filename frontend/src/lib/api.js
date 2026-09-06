@@ -70,20 +70,12 @@ export async function fetchOrFallback(key, path, { method = "GET", body, args } 
 
 export const endpoints = {
   health: () => "/api/health",
-  kpis: () => "/api/kpis",
-  indices: () => "/api/indices",
-  routes: () => "/api/routes",
-  ports: () => "/api/ports",
-  vesselClasses: () => "/api/vessel-classes",
-  vessels: (n = 14) => `/api/vessels?count=${n}`,
-  congestion: () => "/api/congestion",
-  alerts: () => "/api/alerts",
-  berths: (port, days = 10) => `/api/berths?port=${port}&days=${days}`,
-  history: (route, days = 365) => `/api/freight/history?route=${route}&days=${days}`,
-  forecast: (route, horizon = 30) => `/api/freight/forecast?route=${route}&horizon=${horizon}`,
-  matrix: () => "/api/freight/matrix",
-  timing: (route, horizon = 60) => `/api/freight/timing?route=${route}&horizon=${horizon}`,
-  constraints: () => "/api/optimize/constraints",
-  voyage: () => "/api/optimize/voyage",
-  landed: () => "/api/cost/landed",
+
+  // Sourcing optimiser
+  steelOptions: () => "/api/steel/options",
+  steelPlan: () => "/api/steel/plan",
+
+  // Freight index models
+  predictFreight: () => "/api/predict/freight",
+  predictStatus: () => "/api/predict/status",
 };

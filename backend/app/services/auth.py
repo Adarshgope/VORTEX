@@ -12,6 +12,9 @@ from ..db import collection, utcnow
 
 _ITERATIONS = 120_000
 
+# Where user documents live in Atlas — see MONGO_USERS_COLLECTION in .env.
+USER_COLLECTION = config.MONGO_USERS_COLLECTION
+
 
 def hash_password(password, salt=None):
     salt = salt or os.urandom(16).hex()
@@ -59,7 +62,7 @@ def read_token(token):
 
 
 def register_user(email, password, name, company="", role="Chartering Manager"):
-    users = collection("users")
+    users = collection(USER_COLLECTION)
     email = (email or "").strip().lower()
 
     if users.find_one({"email": email}):
@@ -78,7 +81,7 @@ def register_user(email, password, name, company="", role="Chartering Manager"):
 
 
 def authenticate(email, password):
-    users = collection("users")
+    users = collection(USER_COLLECTION)
     email = (email or "").strip().lower()
     user = users.find_one({"email": email})
 

@@ -1,39 +1,75 @@
-/** The post-login application shell. */
+/**
+ * The post-login application shell.
+ *
+ * One screen, not a tab stack: controls on the left, the sourcing decision on
+ * the right. Everything below the header is driven by a single scenario object
+ * posted to `/api/steel/plan`, which carries the optimiser result and the
+ * freight-model forecast in one payload.
+ */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import {
-  Calculator, Container, Gauge, LayoutDashboard, LogOut, Menu, Route as RouteIcon,
-  TrendingUp, X,
-} from "lucide-react";
-import OverviewTab from "../components/dashboard/OverviewTab";
-import OptimizerTab from "../components/dashboard/OptimizerTab";
-import PredictorTab from "../components/dashboard/PredictorTab";
-import CostTab from "../components/dashboard/CostTab";
+import { Container, LogOut, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import ControlPanel from "../components/dashboard/ControlPanel";
+import MetricsBar, { TacticalBanner } from "../components/dashboard/MetricsBar";
+import SourcingPlan from "../components/dashboard/SourcingPlan";
+import CostBreakdown from "../components/dashboard/CostBreakdown";
+import Ledger from "../components/dashboard/Ledger";
+import ForecastPanel from "../components/dashboard/ForecastPanel";
 import { useAuth } from "../lib/authContext";
-import { useHealth } from "../lib/useApi";
-import { API_BASE } from "../lib/api";
+import { useApi, useCompute, useHealth } from "../lib/useApi";
+import { API_BASE, endpoints } from "../lib/api";
 
-const TABS = [
-  { id: "overview", label: "KPI Overview", icon: LayoutDashboard, Component: OverviewTab,
-    blurb: "Live indices, fleet telemetry and risk" },
-  { id: "optimizer", label: "Route Optimization", icon: RouteIcon, Component: OptimizerTab,
-    blurb: "Vessel selection, speed/fuel and berth windows" },
-  { id: "predictor", label: "Freight Predictor", icon: TrendingUp, Component: PredictorTab,
-    blurb: "Historical trends and 30/60-day forecasts" },
-  { id: "cost", label: "Landed Cost", icon: Calculator, Component: CostTab,
-    blurb: "Freight, duty, holding, demurrage, stockout" },
-];
+/** Until `/api/steel/options` lands, drive the panel from these. */
+const SEED = {
+  plant: "rourkela",
+  vessel: "capesize",
+  volume_t: 150000,
+  crude_shock_pct: 0,
+  vlsfo_usd_per_t: 654,
+  usd_inr: 96.28,
+  bdry: 12.19,
+  slow_steaming: true,
+  horizon: 14,
+  vlsfo_touched: false,
+};
 
 export default function Dashboard() {
-  const [tab, setTab] = useState("overview");
-  const [navOpen, setNavOpen] = useState(false);
+  // `overrides` holds only what the operator has actually touched. The live
+  // scenario is SEED <- server defaults <- overrides, derived during render, so
+  // the panel adopts real macro levels the moment `/api/steel/options` lands
+  // without an effect writing state back into the tree.
+  const [overrides, setOverrides] = useState({});
+  const [railOpen, setRailOpen] = useState(true);
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
   const health = useHealth();
 
-  const active = TABS.find((t) => t.id === tab) ?? TABS[0];
-  const Active = active.Component;
+  const { data: options } = useApi("steelOptions", endpoints.steelOptions());
+
+  const scenario = useMemo(
+    () => ({ ...SEED, ...(options?.defaults || {}), ...overrides }),
+    [options, overrides]
+  );
+
+  // `vlsfo_touched` is panel state, not a model input, so the body is built
+  // field by field rather than by stripping keys out of the scenario.
+  const body = useMemo(
+    () => ({
+      plant: scenario.plant,
+      vessel: scenario.vessel,
+      volume_t: scenario.volume_t === "" ? 10000 : scenario.volume_t,
+      crude_shock_pct: scenario.crude_shock_pct,
+      vlsfo_usd_per_t: scenario.vlsfo_usd_per_t,
+      usd_inr: scenario.usd_inr,
+      bdry: scenario.bdry,
+      slow_steaming: scenario.slow_steaming,
+      horizon: scenario.horizon,
+    }),
+    [scenario]
+  );
+
+  const { data: plan, source } = useCompute("steelPlan", endpoints.steelPlan(), body);
 
   const logout = () => {
     signOut();
@@ -43,11 +79,22 @@ export default function Dashboard() {
   const initials = (user?.name || "Demo Desk")
     .split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase();
 
+  // Clearing the overrides drops straight back to the server's own baseline.
+  const reset = () => setOverrides({});
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen bg-[#050d19] text-slate-100">
       {/* ---------------------------------------------------------- top bar */}
       <header className="sticky top-0 z-40 border-b border-blue-500/15 bg-[#050d19]/90 backdrop-blur-xl">
-        <div className="flex h-16 items-center gap-4 px-4 sm:px-6">
+        <div className="flex h-16 items-center gap-3 px-4 sm:px-6">
+          <button
+            onClick={() => setRailOpen((v) => !v)}
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-blue-500/25 text-blue-200/70 transition-colors hover:border-amber-400/50 hover:text-amber-300"
+            aria-label={railOpen ? "Hide controls" : "Show controls"}
+          >
+            {railOpen ? <PanelLeftClose size={16} /> : <PanelLeftOpen size={16} />}
+          </button>
+
           <Link to="/" className="flex items-center gap-2.5">
             <span className="grid h-9 w-9 place-items-center rounded-lg bg-gradient-to-br from-yellow-300 via-amber-400 to-amber-600">
               <Container size={18} className="text-[#0a192f]" strokeWidth={2.4} />
@@ -57,32 +104,14 @@ export default function Dashboard() {
                 VORTEX
               </span>
               <span className="mt-0.5 font-mono text-[8px] tracking-[0.2em] text-blue-300/55">
-                SIH26006 · EAST COAST
+                SIH26006 · BULK CARGO SOURCING
               </span>
             </span>
           </Link>
 
-          {/* desktop tabs */}
-          <nav className="ml-4 hidden items-center gap-1 lg:flex">
-            {TABS.map(({ id, label, icon: Icon }) => (
-              <button
-                key={id}
-                onClick={() => setTab(id)}
-                className={`inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-[12.5px] font-semibold transition-all ${
-                  id === tab
-                    ? "bg-amber-400/12 text-amber-300 ring-1 ring-amber-400/30"
-                    : "text-blue-200/60 hover:bg-blue-500/8 hover:text-white"
-                }`}
-              >
-                <Icon size={15} /> {label}
-              </button>
-            ))}
-          </nav>
-
           <div className="ml-auto flex items-center gap-3">
-            {/* backend liveness */}
             <span
-              title={health.detail || `${API_BASE}`}
+              title={health.detail || API_BASE}
               className={`hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-bold tracking-wider sm:inline-flex ${
                 health.online === null
                   ? "bg-slate-500/12 text-slate-300"
@@ -93,7 +122,11 @@ export default function Dashboard() {
             >
               <span
                 className={`h-1.5 w-1.5 rounded-full ${
-                  health.online === null ? "bg-slate-400" : health.online ? "bg-emerald-400" : "bg-amber-400"
+                  health.online === null
+                    ? "bg-slate-400"
+                    : health.online
+                    ? "bg-emerald-400"
+                    : "bg-amber-400"
                 }`}
               />
               {health.online === null ? "CHECKING" : health.online ? "API LIVE" : "DEMO MODE"}
@@ -104,8 +137,12 @@ export default function Dashboard() {
                 {initials}
               </span>
               <span className="hidden flex-col leading-tight md:flex">
-                <span className="text-[12.5px] font-semibold text-white">{user?.name || "Demo Charterer"}</span>
-                <span className="text-[10px] text-blue-200/50">{user?.role || "Chartering Manager"}</span>
+                <span className="text-[12.5px] font-semibold text-white">
+                  {user?.name || "Demo Charterer"}
+                </span>
+                <span className="text-[10px] text-blue-200/50">
+                  {user?.role || "Procurement Desk"}
+                </span>
               </span>
             </div>
 
@@ -116,70 +153,45 @@ export default function Dashboard() {
             >
               <LogOut size={15} />
             </button>
-
-            <button
-              onClick={() => setNavOpen((v) => !v)}
-              className="grid h-9 w-9 place-items-center rounded-lg border border-blue-500/25 text-blue-100 lg:hidden"
-              aria-label="Toggle sections"
-            >
-              {navOpen ? <X size={17} /> : <Menu size={17} />}
-            </button>
           </div>
         </div>
-
-        {/* mobile tab sheet */}
-        {navOpen && (
-          <div className="border-t border-blue-500/15 px-4 py-3 lg:hidden">
-            <div className="grid gap-2 sm:grid-cols-2">
-              {TABS.map(({ id, label, icon: Icon, blurb }) => (
-                <button
-                  key={id}
-                  onClick={() => { setTab(id); setNavOpen(false); }}
-                  className={`flex items-start gap-2.5 rounded-xl border p-3 text-left transition-colors ${
-                    id === tab
-                      ? "border-amber-400/40 bg-amber-400/10"
-                      : "border-blue-500/20 hover:border-blue-400/40"
-                  }`}
-                >
-                  <Icon size={16} className={id === tab ? "text-amber-300" : "text-blue-300/70"} />
-                  <span>
-                    <span className="block text-[12.5px] font-semibold text-white">{label}</span>
-                    <span className="block text-[10.5px] text-blue-200/50">{blurb}</span>
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
       </header>
 
       {/* ---------------------------------------------------------- content */}
-      <main className="mx-auto max-w-[1600px] px-4 py-6 sm:px-6">
-        <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <h1 className="font-display text-[22px] font-extrabold tracking-tight text-white">
-              {active.label}
-            </h1>
-            <p className="mt-0.5 text-[12.5px] text-blue-200/55">{active.blurb}</p>
-          </div>
+      <div className="mx-auto max-w-[1680px] px-4 py-6 sm:px-6">
+        <div
+          className={`grid gap-5 ${railOpen ? "xl:grid-cols-[320px_minmax(0,1fr)]" : "grid-cols-1"}`}
+        >
+          {railOpen && (
+            <aside className="xl:sticky xl:top-[88px] xl:self-start">
+              <ControlPanel
+                options={options}
+                scenario={scenario}
+                onChange={setOverrides}
+                onReset={reset}
+              />
+            </aside>
+          )}
 
-          <div className="flex items-center gap-2 text-[11px] text-blue-200/45">
-            <Gauge size={13} className="text-amber-400" />
-            <span>
-              {health.online === false
-                ? "Flask API offline — figures generated in-browser"
-                : "Connected to the VORTEX Flask API"}
-            </span>
-          </div>
+          <main className="min-w-0 space-y-5">
+            <TacticalBanner tactical={plan?.tactical} />
+            <MetricsBar plan={plan} />
+            <SourcingPlan plan={plan} source={source} />
+
+            <div className="grid gap-5 lg:grid-cols-2">
+              <CostBreakdown plan={plan} />
+              <Ledger plan={plan} />
+            </div>
+
+            <ForecastPanel forecast={plan?.forecast} />
+          </main>
         </div>
-
-        <Active />
-      </main>
+      </div>
 
       <footer className="border-t border-blue-500/12 px-6 py-5">
         <p className="text-center text-[11px] text-blue-200/35">
-          VORTEX · Vessel Optimization &amp; Rate Tracking for East-coast eXports/imports ·
-          Smart India Hackathon 2026 prototype
+          VORTEX · Intelligent Bulk Cargo Sourcing &amp; Freight Optimizer ·
+          Ministry of Steel · Smart India Hackathon 2026
         </p>
       </footer>
     </div>
