@@ -3,10 +3,10 @@
 # VORTEX — start the Flask API (with the ML freight models loaded) and the Vite
 # dev server together.
 #
-#   ./start_dev.sh              # backend on 5000 (or the next free port), UI on 5173
-#   PORT=5050 ./start_dev.sh    # pin the backend port
+#   ./start_dev.sh              # backend on 5050 (or the next free port), UI on 5173
+#   PORT=5060 ./start_dev.sh    # pin the backend port
 #   ./start_dev.sh --backend    # backend only
-#   ./start_dev.sh --frontend   # frontend only (uses VITE_API_URL, default :5000)
+#   ./start_dev.sh --frontend   # frontend only (proxies /api to VITE_API_URL, default :5050)
 #
 # Ctrl-C stops both.
 
@@ -64,8 +64,11 @@ setup_backend() {
     say "Creating backend virtualenv"
     python3 -m venv "$VENV"
   fi
-  # scikit-learn is the expensive one — only reinstall when it is actually absent.
-  if ! "$VENV/bin/python" -c "import flask, sklearn, joblib" >/dev/null 2>&1; then
+  # Probe one import per requirement group, so an existing virtualenv created
+  # before a group was added still gets topped up rather than silently running
+  # without it. yfinance/pulp were added when the live market feed and the LP
+  # solver landed; checking only flask+sklearn would have skipped both.
+  if ! "$VENV/bin/python" -c "import flask, sklearn, joblib, yfinance, pulp, bs4" >/dev/null 2>&1; then
     say "Installing backend requirements (this takes a minute the first time)"
     "$VENV/bin/pip" install --quiet --upgrade pip
     "$VENV/bin/pip" install --quiet -r "$BACKEND/requirements.txt"
@@ -96,19 +99,22 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-API_PORT="${PORT:-5000}"
+API_PORT="${PORT:-5050}"
 
 if [ "$RUN_BACKEND" -eq 1 ]; then
   sync_models
   setup_backend
-  # macOS AirPlay Receiver squats on 5000; step past whatever is taken.
+  # Step past whatever is taken. (5000 is deliberately not the default — on
+  # macOS AirPlay Receiver owns it and answers with an empty 403.)
   API_PORT="$(free_port "$API_PORT")"
   say "Flask API      → http://localhost:$API_PORT"
   ( cd "$BACKEND" && PORT="$API_PORT" "$VENV/bin/python" run.py ) &
   PIDS+=($!)
 fi
 
-API_URL="${VITE_API_URL:-http://localhost:$API_PORT}"
+# 127.0.0.1 rather than localhost: Flask binds IPv4, and a resolver that hands
+# the proxy ::1 first would get a refused connection before falling back.
+API_URL="${VITE_API_URL:-http://127.0.0.1:$API_PORT}"
 
 if [ "$RUN_FRONTEND" -eq 1 ]; then
   if [ ! -d "$FRONTEND/node_modules" ]; then

@@ -1,12 +1,11 @@
 """
-Freight index forecasting — serves the two trained models.
+Freight index forecasting — the 14-day model behind the dashboard.
 
-`freight_forecast_14d.pkl` and `freight_forecast_30d.pkl` are
-`HistGradientBoostingRegressor`s trained on nine *stationary* features derived
-from three daily macro series: the BDRY dry-bulk freight index, Brent crude and
-USD/INR. They do not predict a price level; they predict the **delta**
-`BDRY(t + h) - BDRY(t)`, so this module rebuilds the exact feature recipe from
-`ML/src/src/train_model.py` before scoring:
+`freight_forecast_14d.pkl` is a `HistGradientBoostingRegressor` trained by
+`ML/src/src/train_model.py` on nine *stationary* features derived from three
+daily macro series: the BDRY dry-bulk freight index, Brent crude and USD/INR. It
+does not predict a price level; it predicts the **delta** `BDRY(t+14) - BDRY(t)`,
+so this module rebuilds the exact feature recipe before scoring:
 
     BDRY_P_Diff_1/5/14   price differences over 1, 5 and 14 sessions
     BDRY_EMA_7/21        EMA minus spot (how far price sits from its own trend)
@@ -15,17 +14,34 @@ USD/INR. They do not predict a price level; they predict the **delta**
     USDINR_Diff_7        rupee 7-session move
     Rolling_Vol_14       14-session std-dev of daily BDRY changes
 
-Output stays in BDRY index points, which is what the sourcing optimiser and the
-dashboard chart both consume.
+The day-by-day curve, the optimal booking day and the tactical signals are the
+ones `ML/app.py` computes, reproduced term for term — see `forecast_index`.
+The trained model adds the one thing that app lacks — a baseline market slope
+read off the real series; ML/app.py's four scenario slopes sit on top of it.
+
+Where the macro series comes from
+---------------------------------
+Three tiers, best first:
+
+1. `live_data.get_macro()` — the same Yahoo Finance pull `ML/data.py` performs,
+   so the forecast is anchored to today's market. Verified to reproduce the
+   training CSV exactly on its final row.
+2. `app/ml_models/master_features_training.csv` — the bundled snapshot.
+3. A deterministic synthetic walk, so the API still answers on a bare checkout.
+
+The live pull happens on a daemon thread and swaps in when it lands; no request
+ever waits on the network.
 
 Design notes
 ------------
 * Feature engineering is pure standard library, so the only hard requirement for
   a live prediction is joblib + scikit-learn.
-* Everything degrades: missing models, a missing CSV, absent scikit-learn or a
-  missing request field all fall back to a deterministic analytic forecast of the
-  identical response shape, flagged `status == "fallback"`.
-* Loading is lazy and cached — the first request warms the models.
+* Everything degrades: a missing pickle, a missing CSV, absent scikit-learn or a
+  missing request field all fall back to a deterministic analytic estimate of
+  the identical response shape, flagged `status == "fallback"`.
+* `ML/models/freight_forecast_30d.pkl` is deliberately not loaded. `ML/app.py`
+  is a 14-day product (`days_ahead = np.arange(1, 15)`); the 30-day pickle is a
+  training-script by-product the team never built a feature on.
 """
 
 import csv
@@ -43,7 +59,7 @@ from pathlib import Path
 
 MODEL_DIR = Path(__file__).resolve().parent.parent / "ml_models"
 
-HORIZONS = (14, 30)
+HORIZON = 14
 
 FEATURE_ORDER = [
     "BDRY_P_Diff_1", "BDRY_P_Diff_5", "BDRY_P_Diff_14",
@@ -52,28 +68,32 @@ FEATURE_ORDER = [
     "USDINR_Diff_7", "Rolling_Vol_14",
 ]
 
-FEATURE_LABELS = {
-    "BDRY_P_Diff_1": "Freight momentum · 1 day",
-    "BDRY_P_Diff_5": "Freight momentum · 5 day",
-    "BDRY_P_Diff_14": "Freight momentum · 14 day",
-    "BDRY_EMA_7": "Short trend gap · 7d EMA",
-    "BDRY_EMA_21": "Medium trend gap · 21d EMA",
-    "Crude_P_Diff_7": "Brent crude · 7 day move",
-    "Crude_EMA_14": "Bunker fuel trend · 14d EMA",
-    "USDINR_Diff_7": "USD/INR · 7 day move",
-    "Rolling_Vol_14": "Freight volatility · 14 day",
-}
-
-# Reported out-of-sample price-level R² from the training run, per horizon.
-MODEL_R2 = {14: 0.706, 30: 0.612}
-
-# A random walk's h-day sigma is vol*sqrt(h). The model explains R² of that
-# variance, so its residual sigma is sqrt(1 - R²) of the naive spread — this is
-# what widens the confidence cone rather than an arbitrary constant.
-_RESIDUAL_RATIO = {h: math.sqrt(max(1.0 - MODEL_R2[h], 0.05)) for h in HORIZONS}
+# Out-of-sample price-level R² from the training run — the figure ML/app.py
+# quotes in its tactical banner.
+MODEL_R2 = 0.706
 
 _MIN_SERIES = 60          # sessions needed before the feature recipe is valid
-_SCENARIO_RAMP_DAYS = 21  # a shock is phased in over three weeks, not overnight
+
+# --- ML/app.py's forward-curve coefficients, verbatim ------------------------
+# forward_drift = crude_slope + port_risk_slope + vessel_spread + holding_pressure
+# The trained model adds a fifth term: the baseline market slope it reads off
+# the real series. ML/app.py has no such term — its curve at zero shock is pure
+# cycle — and the four sliders below are scenario overlays on top of it.
+_CRUDE_SLOPE_PER_PCT = 0.042 / 100.0         # (crude_shock / 100) * 0.042
+_PORT_RISK_SLOPE_PER_DAY = 0.024 / 8.0      # (port_wait_adder / 8) * 0.024
+_VESSEL_SPREAD_COEF = 0.018                  # (v_factor - 1) * 0.018
+_HOLDING_PRESSURE_COEF = 0.012 / 100.0       # ((godown - 35) / 100) * 0.012
+_HOLDING_BASELINE_INR = 35.0
+_CYCLE_AMPLITUDE = 0.12                      # 0.12 * sin(d * 0.45)
+_CYCLE_FREQ = 0.45
+_NEUTRAL_BAND = 1.02                         # "Neutral Window" while p <= base * 1.02
+_BOOK_NOW_DAYS = 3                           # "BOOK IMMEDIATELY" while best_day <= 3
+_ESCALATION_PCT = 2.0                        # banner flips red above +2%
+
+# Slider bands, matching ML/app.py's sidebar.
+PORT_DELAY_RANGE = (0.0, 8.0)
+GODOWN_RANGE = (20.0, 120.0)
+CRUDE_SHOCK_RANGE = (-30.0, 50.0)
 
 
 # ---------------------------------------------------------------------------
@@ -224,62 +244,35 @@ def _feature_frame(bdry, crude, usdinr):
     return rows
 
 
-def _apply_scenario(series, crude_shock_pct, fx_shock_pct, bdry_level):
-    """
-    Build the scenario series the models will actually see.
-
-    A *shock* (crude, FX) is a move, so it is phased into the tail over three
-    weeks — that is the shape the difference and EMA features were trained on,
-    and a step change would look like nothing the model has ever met.
-
-    The BDRY control is a *level*, not a shock, so the whole series is rescaled.
-    Every model feature is scale-proportional, so the relative prediction stays
-    sound instead of registering an enormous fabricated one-day move.
-    """
-    bdry = list(series["bdry"])
-    crude = list(series["crude"])
-    fx = list(series["usdinr"])
-
-    if bdry_level is not None and bdry and bdry[-1] > 0:
-        ratio = bdry_level / bdry[-1]
-        if abs(ratio - 1.0) > 1e-9:
-            bdry = [v * ratio for v in bdry]
-
-    if crude_shock_pct or fx_shock_pct:
-        span = min(_SCENARIO_RAMP_DAYS, len(crude) - 1)
-        for step in range(span + 1):
-            i = len(crude) - 1 - step
-            weight = (span - step) / span if span else 1.0
-            crude[i] *= 1.0 + (crude_shock_pct / 100.0) * weight
-            fx[i] *= 1.0 + (fx_shock_pct / 100.0) * weight
-
-    return bdry, crude, fx
-
-
 # ---------------------------------------------------------------------------
 # Model registry
 # ---------------------------------------------------------------------------
 
 class _Registry:
-    """Lazily loads and caches the pickled models, feature list and macro history."""
+    """Lazily loads and caches the pickled model, feature list and macro history."""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._ready = False
-        self.models = {}
+        self.model = None
         self.feature_columns = list(FEATURE_ORDER)
         self.macro = None
         self.medians = {}
         self.status = "loading"
         self.detail = ""
+        self._live_thread = None
 
     # -- loading ----------------------------------------------------------
+    @staticmethod
+    def _medians_for(macro):
+        rows = _feature_frame(macro["bdry"], macro["crude"], macro["usdinr"])
+        valid = [r for r in rows if r]
+        return ({k: _median([r[k] for r in valid]) for k in FEATURE_ORDER}
+                if valid else {k: 0.0 for k in FEATURE_ORDER})
+
     def _load(self):
         self.macro = _load_macro()
-        rows = _feature_frame(self.macro["bdry"], self.macro["crude"], self.macro["usdinr"])
-        valid = [r for r in rows if r]
-        self.medians = ({k: _median([r[k] for r in valid]) for k in FEATURE_ORDER}
-                        if valid else {k: 0.0 for k in FEATURE_ORDER})
+        self.medians = self._medians_for(self.macro)
 
         try:
             import joblib
@@ -297,26 +290,21 @@ class _Registry:
             except Exception:  # noqa: BLE001 — a bad pickle must not kill the API
                 pass
 
-        missing = []
-        for horizon in HORIZONS:
-            path = MODEL_DIR / f"freight_forecast_{horizon}d.pkl"
-            if not path.exists():
-                missing.append(path.name)
-                continue
-            try:
-                self.models[horizon] = joblib.load(path)
-            except Exception as exc:  # noqa: BLE001
-                missing.append(f"{path.name} ({exc.__class__.__name__})")
-
-        if self.models:
-            self.status = "active"
-            loaded = ", ".join(f"{h}d" for h in sorted(self.models))
-            self.detail = f"Gradient-boosted freight models loaded ({loaded})."
-            if missing:
-                self.detail += f" Unavailable: {', '.join(missing)}."
-        else:
+        path = MODEL_DIR / f"freight_forecast_{HORIZON}d.pkl"
+        if not path.exists():
             self.status = "fallback"
-            self.detail = f"No model artefacts in {MODEL_DIR.name}/ — analytic forecast in use."
+            self.detail = f"{path.name} not found in {MODEL_DIR.name}/ — analytic forecast in use."
+            return
+        try:
+            self.model = joblib.load(path)
+        except Exception as exc:  # noqa: BLE001
+            self.status = "fallback"
+            self.detail = (f"{path.name} failed to load ({exc.__class__.__name__}) — "
+                           f"analytic forecast in use.")
+            return
+
+        self.status = "active"
+        self.detail = f"Gradient-boosted {HORIZON}-day freight model loaded ({path.name})."
 
     def ensure(self):
         if self._ready:
@@ -334,38 +322,92 @@ class _Registry:
                                f"analytic forecast in use.")
             self._ready = True
 
+    # -- macro series -----------------------------------------------------
+    def snapshot(self):
+        """(macro, medians) as one consistent pair — the live swap is atomic."""
+        self.ensure()
+        with self._lock:
+            return self.macro, self.medians
+
+    def adopt(self, macro):
+        """Install a new macro series and the medians derived from it."""
+        medians = self._medians_for(macro)
+        with self._lock:
+            self.macro = macro
+            self.medians = medians
+
+    def refresh_live(self, force=False):
+        """
+        Pull the live feed and adopt it if it differs from what is loaded.
+        Returns True when the series actually changed. Never raises.
+        """
+        self.ensure()
+        try:
+            from . import live_data
+            series, _ = live_data.get_macro(force=force)
+        except Exception:  # noqa: BLE001 — the feed is strictly best-effort
+            return False
+        if not series or not series.get("dates"):
+            return False
+
+        # Compare the last *observation*, not just the last date: BDRY ticks
+        # through the session, so a same-day refetch at a new price is real.
+        def tail(m):
+            if not m or not m.get("dates"):
+                return None
+            return (m.get("source"), m["dates"][-1],
+                    m["bdry"][-1], m["crude"][-1], m["usdinr"][-1])
+
+        if tail(self.macro) == tail(series):
+            return False
+        self.adopt(series)
+        return True
+
+    def refresh_live_async(self):
+        """Kick a live pull on a daemon thread. At most one runs at a time."""
+        with self._lock:
+            if self._live_thread is not None and self._live_thread.is_alive():
+                return
+            thread = threading.Thread(
+                target=self._quiet_refresh, name="vortex-live-macro", daemon=True)
+            self._live_thread = thread
+        thread.start()
+
+    def _quiet_refresh(self):
+        try:
+            self.refresh_live()
+        except Exception:  # noqa: BLE001 — a background thread must die quietly
+            pass
+
     # -- inference --------------------------------------------------------
-    def predict_delta(self, features, horizon):
-        """Index-point change over the horizon. Returns (delta, served_by_model)."""
-        model = self.models.get(horizon)
-        if model is None:
-            return _analytic_delta(features, horizon), False
+    def predict_delta(self, features):
+        """14-day index-point change. Returns (delta, served_by_model)."""
+        if self.model is None:
+            return _analytic_delta(features), False
         vector = [[features[c] for c in self.feature_columns]]
         try:
             with warnings.catch_warnings():
                 # The vector is ordered by the pickled feature_columns, so the
                 # "no feature names" notice is noise rather than a real risk.
                 warnings.simplefilter("ignore")
-                return float(model.predict(vector)[0]), True
+                return float(self.model.predict(vector)[0]), True
         except Exception:  # noqa: BLE001
-            return _analytic_delta(features, horizon), False
+            return _analytic_delta(features), False
 
 
 _REGISTRY = _Registry()
 
 
-def _analytic_delta(features, horizon):
+def _analytic_delta(features):
     """
-    Momentum + mean-reversion stand-in used whenever a real model is not
-    available. Same sign conventions as the trained model, so the dashboard
-    reads the same either way.
+    Momentum + mean-reversion stand-in used whenever the pickle is not
+    available. Same sign conventions as the trained model.
     """
     momentum = features["BDRY_P_Diff_14"] / 14.0 + features["BDRY_P_Diff_5"] / 5.0
     reversion = features["BDRY_EMA_21"] * 0.35
     fuel = features["Crude_P_Diff_7"] * 0.012
     fx = features["USDINR_Diff_7"] * 0.05
-    scale = math.sqrt(horizon / 14.0)
-    return (momentum * 2.6 + reversion + fuel + fx) * scale
+    return momentum * 2.6 + reversion + fuel + fx
 
 
 # ---------------------------------------------------------------------------
@@ -373,193 +415,219 @@ def _analytic_delta(features, horizon):
 # ---------------------------------------------------------------------------
 
 def warm_up():
-    """Load models at process start so the first request is not the slow one."""
+    """
+    Load the model at process start so the first request is not the slow one.
+    The live macro pull is fired off on a daemon thread, so a slow or absent
+    network delays start-up by nothing at all.
+    """
     _REGISTRY.ensure()
+    _REGISTRY.refresh_live_async()
     return model_status()
+
+
+def refresh_live(force=True):
+    """Block on a live macro pull and report what happened (POST /refresh)."""
+    changed = _REGISTRY.refresh_live(force=force)
+    return {"refreshed": changed, "macro": macro_baseline(), "feed": live_status()}
+
+
+def live_status():
+    """Live-feed health, or a flat 'unavailable' if the module cannot import."""
+    try:
+        from . import live_data
+        return live_data.status()
+    except Exception:  # noqa: BLE001
+        return {"enabled": False, "available": False, "connected": False,
+                "last_error": "live_data module unavailable"}
+
+
+def _touch_live():
+    """Nudge a background refresh when the cached pull is cold or stale."""
+    feed = live_status()
+    if not (feed.get("enabled") and feed.get("available")):
+        return
+    if not feed.get("connected") or feed.get("stale"):
+        _REGISTRY.refresh_live_async()
 
 
 def model_status():
     _REGISTRY.ensure()
-    horizons = sorted(_REGISTRY.models)
+    macro, _ = _REGISTRY.snapshot()
     return {
         "status": _REGISTRY.status,
         "active": _REGISTRY.status == "active",
         "detail": _REGISTRY.detail,
         "algorithm": "HistGradientBoostingRegressor (delta target)",
-        "label": ("AI Model: Active · " + "/".join(f"{h}d" for h in horizons) + " GBM")
-                 if horizons else "AI Model: Fallback · analytic forecast",
-        "horizons": horizons or list(HORIZONS),
+        "label": (f"AI Model: Active · {HORIZON}d GBM" if _REGISTRY.model is not None
+                  else "AI Model: Fallback · analytic forecast"),
+        "horizon_days": HORIZON,
         "feature_count": len(_REGISTRY.feature_columns),
         "features": list(_REGISTRY.feature_columns),
-        "r2": {str(h): MODEL_R2[h] for h in HORIZONS},
-        "training_rows": len(_REGISTRY.macro["dates"]) if _REGISTRY.macro else 0,
-        "training_source": _REGISTRY.macro["source"] if _REGISTRY.macro else "",
-        "trained_through": _REGISTRY.macro["dates"][-1] if _REGISTRY.macro else "",
+        "r2": MODEL_R2,
+        "data_source": macro["source"] if macro else "",
+        "data_as_of": macro["dates"][-1] if macro else "",
+        "data_rows": len(macro["dates"]) if macro else 0,
+        "data_is_live": bool(macro and macro.get("live")),
+        "live_feed": live_status(),
     }
 
 
 def macro_baseline():
-    """Latest observed macro levels — the values the sliders start from."""
-    _REGISTRY.ensure()
-    m = _REGISTRY.macro
+    """Latest observed macro levels — what the metric tiles show."""
+    _touch_live()
+    m, _ = _REGISTRY.snapshot()
     return {
         "bdry": round(m["bdry"][-1], 2),
         "brent_usd": round(m["crude"][-1], 2),
         "usd_inr": round(m["usdinr"][-1], 2),
         "as_of": m["dates"][-1],
         "source": m["source"],
+        "is_live": bool(m.get("live")),
     }
 
 
-def _resolve_horizon(value):
-    horizon = _to_float(value, 14)
-    return min(HORIZONS, key=lambda h: abs(h - horizon))
+def _signal(day, price, spot, best_day):
+    """ML/app.py's day-by-day procurement signal."""
+    if day == best_day:
+        return "OPTIMAL", "Optimal buy window — execute fixture"
+    if price <= spot * _NEUTRAL_BAND:
+        return "NEUTRAL", "Neutral window — hold and monitor"
+    return "ESCALATION", "Escalation zone — avoid booking"
 
 
-def _drivers(features, horizon, base_delta, spot_index):
+def forecast_index(crude_shock_pct=0.0, port_delay_days=0.0, vessel_factor=1.0,
+                   godown_rate_inr=None):
     """
-    Per-feature attribution by ablation: replace one feature with its historical
-    median, re-predict, and read off what the live value was worth. Works for the
-    tree model and the analytic fallback alike.
+    14-day BDRY forecast, ML/app.py's decision engine with the trained model
+    supplying the market slope.
+
+    ML/app.py builds its curve as
+
+        forward_drift = crude_slope + port_risk_slope + vessel_spread + holding_pressure
+        price[d]      = spot * (1 + forward_drift * d + 0.12 * sin(0.45 * d))
+
+    All four slopes and the cyclical term are ML/app.py's, verbatim. The trained
+    model contributes what that app lacks — a baseline market slope, its 14-day
+    delta on the *actual* series spread evenly across the horizon. Crude is one
+    of the model's inputs, so it is scored on real crude and the shock slider is
+    the same hypothetical overlay it is in ML/app.py; nothing is counted twice.
+    The best day, the peak, the window saving, the signals and the banner
+    thresholds are all computed exactly as that app does.
+
+    Every argument is optional; a bare call returns the baseline forecast.
     """
-    out = []
-    for key in FEATURE_ORDER:
-        probe = dict(features)
-        probe[key] = _REGISTRY.medians.get(key, 0.0)
-        alt, _ = _REGISTRY.predict_delta(probe, horizon)
-        contribution = base_delta - alt
-        out.append({
-            "key": key,
-            "label": FEATURE_LABELS.get(key, key),
-            "value": round(features[key], 4),
-            "impact_pts": round(contribution, 4),
-            "impact_pct": round(contribution / spot_index * 100.0, 2) if spot_index else 0.0,
-            "direction": "up" if contribution > 0 else "down" if contribution < 0 else "flat",
-        })
+    _touch_live()
 
-    out.sort(key=lambda d: abs(d["impact_pct"]), reverse=True)
-    top = out[:5]
-    peak = max((abs(d["impact_pct"]) for d in top), default=0.0) or 1.0
-    for d in top:
-        d["weight"] = round(abs(d["impact_pct"]) / peak, 3)
-    return top
+    crude_shock = _clamp(_to_float(crude_shock_pct, 0.0) or 0.0, *CRUDE_SHOCK_RANGE)
+    port_delay = _clamp(_to_float(port_delay_days, 0.0) or 0.0, *PORT_DELAY_RANGE)
+    v_factor = _to_float(vessel_factor, 1.0) or 1.0
+    godown = _to_float(godown_rate_inr, _HOLDING_BASELINE_INR)
+    godown = _clamp(godown if godown is not None else _HOLDING_BASELINE_INR, *GODOWN_RANGE)
 
-
-def _curve(horizon, spot, target, mid, rel_sigma):
-    """
-    Day-by-day index path from today to the horizon prediction.
-
-    A 30-day request bends through the 14-day model's own number at its midpoint,
-    so both artefacts genuinely shape the curve rather than one interpolating
-    blind. Small seeded wobble keeps the optimal booking day meaningful without
-    making the line look random.
-    """
-    rng = _seeded("bdry-curve", horizon, round(target, 3), round(spot, 3))
-    start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    points = []
-
-    for day in range(1, horizon + 1):
-        if horizon > 14 and mid is not None:
-            if day <= 14:
-                level = spot + (mid - spot) * (day / 14.0) ** 0.85
-            else:
-                level = mid + (target - mid) * ((day - 14) / (horizon - 14.0)) ** 0.9
-        else:
-            level = spot + (target - spot) * (day / horizon) ** 0.85
-
-        level *= 1.0 + rng.gauss(0, rel_sigma * 0.10)
-        level = max(level, spot * 0.45)
-
-        sigma = spot * rel_sigma * math.sqrt(day / horizon)
-        points.append({
-            "date": (start + timedelta(days=day)).strftime("%Y-%m-%d"),
-            "day": day,
-            "forecast": round(level, 2),
-            "lower": round(max(level - 1.96 * sigma, spot * 0.35), 2),
-            "upper": round(level + 1.96 * sigma, 2),
-        })
-
-    # Pin the endpoint to the model's own number — the wobble must not move it.
-    points[-1]["forecast"] = round(target, 2)
-    return points
-
-
-def forecast_index(horizon=14, crude_shock_pct=0.0, fx_shock_pct=0.0, bdry_level=None):
-    """
-    Forecast the BDRY freight index over a 14- or 30-day horizon.
-
-    Every argument is optional; a bare call returns the baseline forecast from
-    the latest observed macro data.
-    """
-    _REGISTRY.ensure()
-
-    horizon = _resolve_horizon(horizon)
-    crude_shock = _clamp(_to_float(crude_shock_pct, 0.0) or 0.0, -30.0, 50.0)
-    fx_shock = _clamp(_to_float(fx_shock_pct, 0.0) or 0.0, -15.0, 15.0)
-    bdry_level = _to_float(bdry_level, None)
-    if bdry_level is not None:
-        bdry_level = _clamp(bdry_level, 4.0, 60.0)
-
-    macro = _REGISTRY.macro
-    bdry, crude, fx = _apply_scenario(macro, crude_shock, fx_shock, bdry_level)
+    # One consistent (series, medians) pair for the whole request.
+    macro, medians = _REGISTRY.snapshot()
+    bdry, crude, fx = macro["bdry"], macro["crude"], macro["usdinr"]
     rows = _feature_frame(bdry, crude, fx)
     features = next((r for r in reversed(rows) if r), None)
     if features is None:  # series too short to build a feature row
-        features = dict(_REGISTRY.medians)
+        features = dict(medians)
 
     spot = bdry[-1]
-    delta, served_by_model = _REGISTRY.predict_delta(features, horizon)
-    target = max(spot + delta, spot * 0.4)
+    delta, served_by_model = _REGISTRY.predict_delta(features)
+    model_target = spot + delta
 
-    daily_vol = features["Rolling_Vol_14"] or (spot * 0.012)
-    rel_sigma = _clamp(
-        (daily_vol * math.sqrt(horizon) * _RESIDUAL_RATIO[horizon]) / spot if spot else 0.06,
-        0.015, 0.30)
-    band = 1.96 * target * rel_sigma
-    confidence = round(_clamp(
-        1.0 - rel_sigma * 2.6 - (0.04 if not served_by_model else 0.0), 0.42, 0.95), 2)
+    # -- ML/app.py's forward curve, with the model as the market slope --------
+    model_slope = (delta / spot) / HORIZON if spot else 0.0
+    crude_slope = crude_shock * _CRUDE_SLOPE_PER_PCT
+    port_risk_slope = port_delay * _PORT_RISK_SLOPE_PER_DAY
+    vessel_spread = (v_factor - 1.0) * _VESSEL_SPREAD_COEF
+    holding_pressure = (godown - _HOLDING_BASELINE_INR) * _HOLDING_PRESSURE_COEF
+    drift = model_slope + crude_slope + port_risk_slope + vessel_spread + holding_pressure
 
+    start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    prices = [spot * (1.0 + drift * d + _CYCLE_AMPLITUDE * math.sin(d * _CYCLE_FREQ))
+              for d in range(1, HORIZON + 1)]
+    prices = [max(p, spot * 0.4) for p in prices]
+
+    target = prices[-1]
     change_pct = (target - spot) / spot * 100.0 if spot else 0.0
+    best_idx = min(range(HORIZON), key=lambda i: prices[i])
+    peak_idx = max(range(HORIZON), key=lambda i: prices[i])
+    best_day, best_price = best_idx + 1, prices[best_idx]
+    peak_price = prices[peak_idx]
+    window_saving = (peak_price - best_price) / peak_price * 100.0 if peak_price else 0.0
 
-    mid = None
-    if horizon > 14:
-        mid_delta, _ = _REGISTRY.predict_delta(features, 14)
-        mid = spot + mid_delta
+    points = []
+    for i, price in enumerate(prices):
+        day = i + 1
+        date = start + timedelta(days=day)
+        code, label = _signal(day, price, spot, best_day)
+        points.append({
+            "date": date.strftime("%Y-%m-%d"),
+            "weekday": date.strftime("%A"),
+            "day": day,
+            "forecast": round(price, 2),
+            "change_pct": round((price - spot) / spot * 100.0, 2) if spot else 0.0,
+            "signal": code,
+            "signal_label": label,
+        })
 
-    points = _curve(horizon, spot, target, mid, rel_sigma)
-    best = min(points, key=lambda p: p["forecast"])
-    peak = max(points, key=lambda p: p["forecast"])
-    window_saving = ((peak["forecast"] - best["forecast"]) / peak["forecast"] * 100.0
-                     if peak["forecast"] else 0.0)
+    best_date = start + timedelta(days=best_day)
+    timing = ({
+        "level": "critical",
+        "action": f"BOOK IMMEDIATELY — DAY {best_day}",
+        "detail": (f"Forward freight pressure is accelerating. Best booking day is within "
+                   f"{best_day} day(s) ({best_date.strftime('%A, %d %b')}). Booking before "
+                   f"rate escalation saves up to {window_saving:.2f}% against the 14-day peak."),
+    } if best_day <= _BOOK_NOW_DAYS else {
+        "level": "clear",
+        "action": f"STAGGER & FIX ON DAY {best_day}",
+        "detail": (f"Forward indicators show freight reaching a tactical low of "
+                   f"{best_price:.2f} on day {best_day} ({best_date.strftime('%A, %d %b')}). "
+                   f"Buffer inventory at plant and fix the charter fixture on day {best_day}."),
+    })
 
     history = [{"date": d, "index": round(v, 2)}
                for d, v in zip(macro["dates"][-90:], bdry[-90:])]
 
     return {
-        "horizon_days": horizon,
+        "horizon_days": HORIZON,
         "unit": "BDRY pts",
         "as_of": macro["dates"][-1],
+        "data_source": macro["source"],
+        "data_is_live": bool(macro.get("live")),
         "spot_index": round(spot, 2),
         "forecast_index": round(target, 2),
-        "delta": round(delta, 3),
         "change_pct": round(change_pct, 2),
-        "confidence_lower": round(max(target - band, spot * 0.35), 2),
-        "confidence_upper": round(target + band, 2),
-        "confidence": confidence,
-        "trend_direction": ("RISING" if change_pct > 2.0
-                            else "FALLING" if change_pct < -2.0 else "STABLE"),
+        "trend_direction": ("RISING" if change_pct > _ESCALATION_PCT
+                            else "FALLING" if change_pct < -_ESCALATION_PCT else "STABLE"),
+        "escalating": change_pct > _ESCALATION_PCT,
+        # The trained model's own number, before the scenario slopes and the
+        # cyclical term shape the day-by-day path.
+        "model_delta": round(delta, 3),
+        "model_target": round(model_target, 2),
+        "drift": {
+            "model": round(model_slope, 5),
+            "crude_shock": round(crude_slope, 5),
+            "port_risk": round(port_risk_slope, 5),
+            "vessel_spread": round(vessel_spread, 5),
+            "holding_pressure": round(holding_pressure, 5),
+            "total_per_day": round(drift, 5),
+        },
         "history": history,
         "points": points,
-        "best_entry": {"date": best["date"], "day": best["day"], "index": best["forecast"]},
-        "peak": {"date": peak["date"], "day": peak["day"], "index": peak["forecast"]},
+        "best_entry": {"date": points[best_idx]["date"], "weekday": points[best_idx]["weekday"],
+                       "day": best_day, "index": round(best_price, 2),
+                       "change_pct": round((best_price - spot) / spot * 100.0, 2) if spot else 0.0},
+        "peak": {"date": points[peak_idx]["date"], "day": peak_idx + 1,
+                 "index": round(peak_price, 2)},
         "window_saving_pct": round(window_saving, 2),
-        "key_drivers": _drivers(features, horizon, delta, spot),
+        "timing": timing,
         "scenario": {
-            "horizon": horizon,
             "crude_shock_pct": crude_shock,
-            "fx_shock_pct": fx_shock,
-            "bdry_level": round(spot, 2),
+            "port_delay_days": port_delay,
+            "vessel_factor": round(v_factor, 3),
+            "godown_rate_inr": godown,
         },
-        "model": {**model_status(), "served_by_model": served_by_model,
-                  "horizon_r2": MODEL_R2[horizon]},
+        "model": {**model_status(), "served_by_model": served_by_model},
     }

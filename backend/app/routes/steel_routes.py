@@ -7,6 +7,25 @@ from ..services import steel_engine
 steel_bp = Blueprint("steel", __name__, url_prefix="/api/steel")
 
 
+def _json_body():
+    """
+    (body, error) for a POST.
+
+    An absent body is fine — every field is optional, so `{}` is the documented
+    baseline request. A body that was *sent* but does not parse, or parses to
+    something other than an object, is a client error rather than a silent
+    fallback to defaults.
+    """
+    if not request.get_data():
+        return {}, None
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return None, "Request body is not valid JSON."
+    if not isinstance(payload, dict):
+        return None, "Request body must be a JSON object."
+    return payload, None
+
+
 @steel_bp.get("/options")
 def options():
     """Plants, ports, vessel classes, suppliers, macro baseline and slider ranges."""
@@ -22,21 +41,19 @@ def plan():
     """
     Optimal sourcing plan for one steel plant.
 
-    Body (every field optional):
+    Body (every field optional) — ML/app.py's sidebar:
         plant            rourkela | bokaro | vizag
         vessel           capesize | panamax | supramax
         volume_t         10000 .. 500000
         crude_shock_pct  -30 .. 50
-        vlsfo_usd_per_t  bunker price override; defaults to Brent parity
-        usd_inr          working exchange rate
-        bdry             freight index level
+        port_delay_days  0 .. 8       simulated port congestion spike
+        godown_rate_inr  20 .. 120    plant stockyard rate (defaults per plant)
         slow_steaming    true | false
-        horizon          14 | 30
     """
-    payload = request.get_json(silent=True)
-    if payload is not None and not isinstance(payload, dict):
-        return jsonify({"error": "Request body must be a JSON object."}), 400
+    payload, error = _json_body()
+    if error:
+        return jsonify({"error": "Invalid request.", "detail": error}), 400
     try:
-        return jsonify(steel_engine.plan(payload or {}))
+        return jsonify(steel_engine.plan(payload))
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": "Sourcing plan failed.", "detail": str(exc)}), 500

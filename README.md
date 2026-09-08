@@ -11,7 +11,10 @@ right vessel class, and price the cargo all the way to the godown.
 
 ## Running it
 
-Two processes: Flask on **5000**, Vite on **5173**.
+Two processes: Flask on **5050**, Vite on **5173**. The Vite dev server proxies
+`/api` to Flask, so the browser only ever talks to its own origin — there is no
+API port to configure on the frontend side unless the backend is somewhere
+unusual.
 
 ### Both at once
 
@@ -31,30 +34,31 @@ one side only.
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-python run.py                      # http://localhost:5000
+python run.py                      # http://localhost:5050
 ```
 
-> **macOS:** Control Center's AirPlay Receiver also listens on port 5000.
-> `run.py` detects this and tells you what to do — either turn AirPlay Receiver
-> off in *System Settings → General → AirDrop & Handoff*, or run on another port:
->
-> ```bash
-> PORT=5050 python run.py
-> ```
+> **Why 5050 and not Flask's usual 5000:** on macOS, Control Center's AirPlay
+> Receiver owns port 5000 and answers every HTTP request with an empty `403`. A
+> frontend pointed there falls silently into demo mode — every panel renders,
+> nothing is real, and the only tell is the **DEMO MODE** pill in the header.
+> `run.py` refuses to start on a busy port and says what to do instead.
 
 ### Frontend
 
 ```bash
 cd frontend
 npm install
-npm run dev                        # http://localhost:5173
+npm run dev                        # http://localhost:5173 — proxies /api → :5050
 ```
 
-If the backend is on a non-default port, point the frontend at it:
+If the backend is on a non-default port, point the dev proxy at it:
 
 ```bash
-VITE_API_URL=http://localhost:5050 npm run dev
+VITE_API_URL=http://127.0.0.1:5051 npm run dev
 ```
+
+If the header pill reads **DEMO MODE**, the browser is not reaching Flask. Hover
+the pill: it names the URL it tried and the status it got.
 
 ### Signing in
 
@@ -116,13 +120,13 @@ One screen, no tab stack: controls on the left, the decision on the right.
 
 | Region | Contents |
 |---|---|
-| **Control rail** | Destination steel plant (SAIL Rourkela / SAIL Bokaro / RINL Vizag), order volume, vessel class, macro stress-test sliders (Brent crude shock %, VLSFO bunker $/MT, USD/INR, BDRY index), Virtual Arrival toggle, 14/30-day forecast horizon |
-| **Tactical banner** | The procurement call — ADVANCE SPOT CHARTER BOOKINGS / STAGGER CHARTER CONTRACTS / DEFER FIXTURES, driven by the model's projected move |
-| **Metrics bar** | Live BDRY with its 14/30-day target, Brent crude $/bbl, VLSFO bunker $/MT, USD/INR |
+| **Control rail** | `ML/app.py`'s sidebar, control for control: destination steel plant (SAIL Rourkela / SAIL Bokaro / RINL Vizag), order volume, vessel class, the three stress-test sliders (Brent crude shock %, simulated port congestion spike in days, plant godown rate ₹/MT) and the Virtual Arrival toggle. BDRY, Brent, VLSFO and USD/INR are live readings, not inputs |
+| **Tactical banner** | The procurement call — ADVANCE SPOT CHARTER BOOKINGS above a +2% projected move, STAGGER CHARTER CONTRACTS otherwise: `ML/app.py`'s two states on its threshold |
+| **Metrics bar** | Live BDRY with its 14-day target, Brent crude $/bbl, VLSFO bunker $/MT, USD/INR |
 | **Optimal sourcing plan** | Every feasible origin × discharge-port routing, ranked and priced to the plant: supplier origin, discharge port, allocated volume, ocean / port / FOIS rail legs, landed ₹/MT, premium over rank 1 |
 | **Multi-modal cost stack** | The allocated routing split into FOB, ocean freight, grade adjustment, port handling, demurrage, rail and godown, in ₹/MT |
-| **Financial ledger** | Procurement budget in ₹ crores, saving against the costliest feasible routing, and what Virtual Arrival is worth |
-| **Freight index forecast** | Realised BDRY flowing into the 14- or 30-day model curve with its 95% cone and the optimal charter window |
+| **Financial ledger** | Procurement budget in ₹ crores and average landed cost; fuel saved and demurrage eliminated under Virtual Arrival, or demurrage paid without it; the mid-voyage advisory once a congestion spike passes two days |
+| **Freight index forecast** | `ML/app.py`'s 14-day tactical engine: realised BDRY flowing into the forward curve, the optimal charter window, its four timing metrics and the day-by-day procurement schedule with green / amber / red signals |
 
 Slider moves re-post the whole scenario, so every panel updates together.
 
@@ -138,8 +142,11 @@ app adds the headers itself.
 | GET | `/api/health` | Service, database and ML model status |
 | GET | `/api/steel/options` | Plants, ports, vessel classes, origins, macro baseline, slider ranges |
 | POST | `/api/steel/plan` | **The optimiser** — ranked routings, allocation, ledger and forecast |
-| POST | `/api/predict/freight` | **ML** 14/30-day BDRY forecast: level, band, drivers, curve |
-| GET | `/api/predict/status` | Model health for the dashboard badge |
+| POST | `/api/predict/freight` | **ML** 14-day BDRY forecast: forward curve, optimal booking day, day-by-day signals |
+| GET | `/api/predict/freight` | Same forecast from a query string — `?crude_shock_pct=10&port_delay_days=2` |
+| GET | `/api/predict/status` | Model health, feature list and live-feed state |
+| GET | `/api/predict/macro` | Latest observed BDRY / Brent / USD-INR and their provenance |
+| POST | `/api/predict/refresh` | Force a live market pull and re-baseline |
 | POST | `/api/auth/register` · `/api/auth/login` · GET `/api/auth/me` | Session |
 
 ### The sourcing optimiser
@@ -151,10 +158,16 @@ minimise  sum_r  x_r * landed_cost_r
 s.t.      sum_r  x_r = demand,   x_r >= 0
 ```
 
-with no per-route capacity. That program is degenerate — its optimum puts the
-whole requirement on the single cheapest feasible routing — so `steel_engine.py`
-computes that closed form directly and gets an identical answer without taking on
-a solver dependency. Every rejected routing is still priced and ranked, so the
+with no per-route capacity. `steel_engine.py` hands that exact program to PuLP's
+CBC solver, so the allocation is a real LP solve rather than an imitation of one,
+and `ledger.solver` records which engine answered.
+
+The program is degenerate — with no capacity ceiling the optimum puts the whole
+requirement on the single cheapest feasible routing — so the closed form agrees
+with CBC to the tonne. It is kept as the fallback for an environment without
+PuLP, and the two were checked against each other across 162 feasible scenarios
+(3 plants × 3 vessel classes × 3 volumes × 3 crude shocks × both steaming modes)
+with zero disagreement. Every rejected routing is still priced and ranked, so the
 desk sees what was passed over and by how much.
 
 Cost stack, per tonne:
@@ -184,17 +197,21 @@ passage. The ledger prices the plan both ways and reports the delta.
 
 ### The trained freight models
 
-`POST /api/predict/freight` is served by two `HistGradientBoostingRegressor`s
+`POST /api/predict/freight` is served by a `HistGradientBoostingRegressor`
 trained in the sibling **ML** project and shipped in `backend/app/ml_models/`:
 
 | Artefact | Horizon | Out-of-sample price-level R² |
 |---|---|---|
 | `freight_forecast_14d.pkl` | 14 days | 0.706 |
-| `freight_forecast_30d.pkl` | 30 days | 0.612 |
 | `feature_columns.pkl` | — | the nine feature names, in training order |
 
-They do **not** predict a price level — they predict the *delta*
-`BDRY(t+h) − BDRY(t)`, from nine stationary features rebuilt at inference time by
+`freight_forecast_30d.pkl` also comes out of the training script but is
+deliberately not loaded: `ML/app.py` is a 14-day product
+(`days_ahead = np.arange(1, 15)`) and no feature was ever built on the 30-day
+model, so the API and the dashboard do not offer one.
+
+It does **not** predict a price level — it predicts the *delta*
+`BDRY(t+14) − BDRY(t)`, from nine stationary features rebuilt at inference time by
 `services/ml_engine.py` from the BDRY freight index, Brent crude and USD/INR:
 
 ```
@@ -206,18 +223,58 @@ USDINR_Diff_7                rupee 7-session move
 Rolling_Vol_14               14-session std-dev of daily BDRY changes
 ```
 
-The index delta is then rebased onto the selected lane's USD/tonne spot, which is
-what a charterer actually fixes against.
+The day-by-day path is `ML/app.py`'s curve, term for term:
 
-- **Scenario sliders** — a bunker or FX shock is phased into the tail of the
-  macro series over three weeks rather than applied as a step, so the difference
-  and EMA features see a move of the shape they were trained on. Berth congestion
-  is priced on top of the model rather than fed into it.
-- **Confidence band** — a random walk's h-day sigma is `vol·√h`; the model
-  explains R² of that variance, so the cone is `√(1−R²)` of the naive spread
-  rather than an arbitrary constant.
-- **Explainability** — each driver bar is an ablation: replace one feature with
-  its historical median, re-predict, and read off what the live value was worth.
+```
+forward_drift = model_slope + crude_slope + port_risk_slope + vessel_spread + holding_pressure
+price[d]      = spot × (1 + forward_drift × d + 0.12 × sin(0.45 × d))
+```
+
+where `crude_slope`, `port_risk_slope`, `vessel_spread` and `holding_pressure`
+are that app's coefficients on the four sidebar inputs, and `model_slope` is the
+one thing it lacked — the trained model's 14-day delta on the *actual* series,
+spread across the horizon. The best day, the peak, the window saving, the
+day-by-day signals and the banner thresholds are computed exactly as the app
+does them. Because every slider feeds the drift, every slider moves the target,
+the percentage and the optimal day — which the earlier straight-line curve
+never did.
+
+### The live market feed
+
+`ML/data.py` and `ML/src/run_all_data.py` pull three daily series off Yahoo
+Finance to build the training set. `services/live_data.py` performs the *same*
+pull while the API is running, so the models score today's market instead of the
+CSV snapshot frozen into `app/ml_models/`:
+
+| Ticker | Series | Column |
+|---|---|---|
+| `BDRY` | Breakwave Dry Bulk Shipping ETF | `Freight_Index_BDRY` |
+| `BZ=F` | Brent crude futures | `Brent_Crude_USD` |
+| `USDINR=X` | Rupee spot | `USD_INR_Exchange_Rate` |
+
+The swap is safe because the feed and the training CSV are the *same series*: on
+2026-07-20, the CSV's last row, the live pull returns BDRY 12.19 / Brent 89.22 /
+USD-INR 96.28 — matching the CSV to the cent. The model sees the distribution it
+was fitted on, only current. It matters: that frozen row had BDRY at 12.19 while
+the market was trading at 16.30, so the dashboard was reading ~34% below spot.
+
+Three tiers, best first — live feed, bundled CSV, deterministic synthetic walk.
+Start-up loads the CSV synchronously and fires the live pull on a daemon thread,
+so no request ever waits on the network and a machine with no connectivity boots
+identically. Every panel badges which tier it is showing; a stale chart is never
+passed off as a live one.
+
+```bash
+VORTEX_LIVE_DATA=0    # disable the feed entirely (offline demos)
+VORTEX_LIVE_TTL=3600  # seconds before a cached pull is refetched
+```
+
+- **Why a hand-set crude slope next to a model that already reads crude** —
+  the tree saturates: on today's series the highest split on `Crude_P_Diff_7`
+  sits below the current 7-day move, so a +5% and a +50% shock land in the same
+  leaf. The model is therefore scored on real crude for the *baseline* slope,
+  and the shock slider is the same hypothetical overlay it is in `ML/app.py`.
+  Nothing is counted twice, and the slider always moves the curve.
 - **Graceful fallback** — a missing pickle, a missing CSV, an absent
   scikit-learn or a missing request field all degrade to a deterministic analytic
   forecast of the *identical* response shape, flagged in the model badge. The
@@ -234,10 +291,19 @@ data is identical to `domain.py` and the cost stack reproduces `steel_engine.py`
 line for line, so the rupee figures match and every panel keeps working. Each
 panel badges its source **DEMO** instead of **LIVE**.
 
-The one thing that cannot be mirrored is the trained model: the pickles do not
-run in the browser, so the forecast falls back to the same analytic estimator the
-Python service uses when scikit-learn is absent, and the model badge says so.
-Response shapes are kept identical between the two paths.
+Two things cannot be mirrored. The pickles do not run in the browser, so the
+forecast falls back to the same analytic estimator the Python service uses when
+scikit-learn is absent. And with Flask unreachable there is no live market feed,
+so the mirror scores its own deterministic macro baseline. Both are stated on the
+badges rather than implied away, and response shapes are kept identical between
+the two paths — verified field by field against the running API.
+
+The mirror only steps in for a backend that is *unreachable* (connection
+refused, proxy 502, timeout, non-JSON). A `4xx` means the request itself was
+wrong, and that is surfaced in the panel with a **Retry** rather than papered
+over. A panel whose request fails outright shows what happened instead of a
+skeleton that never resolves, and an amber strip under the header names the URL
+and status the browser got whenever any panel is on the mirror.
 
 ---
 
@@ -256,8 +322,9 @@ backend/
     ml_models/              trained .pkl models + the training feature CSV
     routes/                 auth · steel · predict blueprints
     services/
-      steel_engine.py       routing economics, allocation, ledger
+      steel_engine.py       routing economics, LP allocation, ledger
       ml_engine.py          model loading, feature recipe, index forecast
+      live_data.py          Yahoo Finance macro pull (the ML ingestion path)
       auth.py               PBKDF2 credentials + signed session tokens
 frontend/
   src/

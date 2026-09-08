@@ -3,14 +3,18 @@ import ScrollStage from "../components/landing/ScrollStage";
 import About from "../components/landing/About";
 import Footer from "../components/landing/Footer";
 
-const PORTS_TICKER = [
-  "VISAKHAPATNAM", "PARADIP", "HALDIA", "CHENNAI", "KOLKATA", "GANGAVARAM",
-  "KRISHNAPATNAM", "KAKINADA", "KAMARAJAR", "TUTICORIN",
+// The network the optimiser actually prices: four discharge ports, three
+// destination plants and three seaborne origins. Anything not in
+// backend/app/domain.py does not belong on this strip.
+const NETWORK_TICKER = [
+  "PARADIP", "DHAMRA", "VISAKHAPATNAM", "HALDIA",
+  "SAIL ROURKELA", "SAIL BOKARO", "RINL VIZAG",
+  "AUSTRALIA", "SOUTH AFRICA", "INDONESIA",
 ];
 
-/** Continuous port marquee bridging the scroll story and the About block. */
+/** Continuous network marquee bridging the scroll story and the About block. */
 function PortTicker() {
-  const row = [...PORTS_TICKER, ...PORTS_TICKER];
+  const row = [...NETWORK_TICKER, ...NETWORK_TICKER];
   return (
     <div className="relative overflow-hidden border-y border-amber-400/20 bg-[#0a192f] py-3.5">
       <div className="animate-marquee flex w-max items-center gap-10 whitespace-nowrap">

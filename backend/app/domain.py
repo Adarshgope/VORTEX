@@ -16,33 +16,42 @@ Money conventions
 # ---------------------------------------------------------------------------
 # Discharge ports. draft/dwt are the governing berth constraints; wait_hours is
 # the historic average anchorage queue before a berth frees up.
+#
+# `queue_delay_days` is the additional anchorage backlog carried on top of
+# wait_hours. ML/app.py calls its equivalent a "live" figure and tries to scrape
+# it from https://paradipport.gov.in/vessel_status.aspx — that page returns 404,
+# so the scrape never matched anything and the values below are exactly the
+# constants its except-branch fell back to. They are Indian Ports Association
+# reference averages, not a live feed, and the API reports them as such
+# (`congestion.source == "reference"`); the field was renamed off "live_" so the
+# payload stops implying a telemetry link that does not exist.
 # ---------------------------------------------------------------------------
 
 PORTS = [
     {
         "code": "INDHM", "name": "Dhamra Port", "short": "Dhamra", "state": "Odisha",
         "max_draft_m": 18.5, "max_dwt": 180000, "wait_hours": 12.0,
-        "tariff_usd_per_t": 3.40, "demurrage_day_usd": 25000, "live_delay_days": 0.5,
+        "tariff_usd_per_t": 3.40, "demurrage_day_usd": 25000, "queue_delay_days": 0.5,
         "note": "Deepest private berth on the coast; shortest queue.",
     },
     {
         "code": "INPRT", "name": "Paradip Port", "short": "Paradip", "state": "Odisha",
         "max_draft_m": 17.1, "max_dwt": 180000, "wait_hours": 18.5,
-        "tariff_usd_per_t": 2.80, "demurrage_day_usd": 25000, "live_delay_days": 1.5,
+        "tariff_usd_per_t": 2.80, "demurrage_day_usd": 25000, "queue_delay_days": 1.5,
         "note": "Lowest tariff; mechanised coal handling plant.",
     },
     {
         "code": "INVTZ", "name": "Visakhapatnam Port", "short": "Vizag",
         "state": "Andhra Pradesh",
         "max_draft_m": 18.1, "max_dwt": 200000, "wait_hours": 24.2,
-        "tariff_usd_per_t": 3.10, "demurrage_day_usd": 28000, "live_delay_days": 2.0,
+        "tariff_usd_per_t": 3.10, "demurrage_day_usd": 28000, "queue_delay_days": 2.0,
         "note": "Only berth on the coast built for 200k DWT; feeds RINL by conveyor.",
     },
     {
         "code": "INHLD", "name": "Haldia Dock Complex", "short": "Haldia",
         "state": "West Bengal",
         "max_draft_m": 11.5, "max_dwt": 65000, "wait_hours": 38.4,
-        "tariff_usd_per_t": 4.20, "demurrage_day_usd": 20000, "live_delay_days": 3.0,
+        "tariff_usd_per_t": 4.20, "demurrage_day_usd": 20000, "queue_delay_days": 3.0,
         "note": "Riverine draft limit caps intake at Supramax; longest queue.",
     },
 ]

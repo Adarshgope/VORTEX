@@ -9,10 +9,10 @@
  */
 
 import { Ship } from "lucide-react";
-import { Panel, Skeleton, SourceChip } from "./ui";
+import { ErrorState, Panel, Skeleton, SourceChip } from "./ui";
 import { inr, num, usd } from "../../lib/format";
 
-export default function SourcingPlan({ plan, source }) {
+export default function SourcingPlan({ plan, source, error, onRetry }) {
   const routes = plan?.routes || [];
   const infeasible = plan?.infeasible || [];
 
@@ -29,7 +29,9 @@ export default function SourcingPlan({ plan, source }) {
     >
       {!plan ? (
         <div className="p-5">
-          <Skeleton className="h-56 w-full" />
+          {error
+            ? <ErrorState title="Optimiser did not answer" message={error} onRetry={onRetry} />
+            : <Skeleton className="h-56 w-full" />}
         </div>
       ) : !routes.length ? (
         <div className="px-5 py-10 text-center">

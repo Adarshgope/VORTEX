@@ -3,7 +3,7 @@
 import { useLayoutEffect, useRef } from "react";
 import { Link } from "react-router-dom";
 import {
-  AlarmClock, ArrowRight, Clock4, Gauge, Ruler, Ship, Star, TrendingUp,
+  AlarmClock, ArrowRight, Clock4, Gauge, Ruler, Ship, TrendingUp,
 } from "lucide-react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
@@ -11,20 +11,25 @@ import PortVisual from "./PortVisual";
 
 gsap.registerPlugin(ScrollTrigger);
 
+// Every claim here maps to something the platform actually computes. Vessel
+// classes come from domain.VESSELS, horizons from ml_engine.HORIZONS, berth
+// limits from steel_engine._price_route. Nothing aspirational.
 const FEATURES = [
-  { icon: Clock4, title: "Optimal Market Entry Timing", note: "Fix when the curve bottoms" },
-  { icon: Ship, title: "Vessel Type Optimization", note: "Handysize through Capesize" },
-  { icon: Ruler, title: "East Coast Port Constraint Mapping", note: "Draft · LOA · Beam" },
-  { icon: TrendingUp, title: "Predictive Freight Rate Forecasting", note: "30 / 60-day spot outlook" },
-  { icon: Gauge, title: "Idle Time & Deadheading Minimization", note: "Speed vs. bunker trade-off" },
-  { icon: AlarmClock, title: "Early Risk & Port Congestion Warnings", note: "Laycan exposure alerts" },
+  { icon: Clock4, title: "Optimal Market Entry Timing", note: "Best fixture day on the forward curve" },
+  { icon: Ship, title: "Vessel Class Optimization", note: "Supramax · Panamax · Capesize" },
+  { icon: Ruler, title: "East Coast Port Constraint Mapping", note: "Draft and DWT berth limits" },
+  { icon: TrendingUp, title: "Predictive Freight Rate Forecasting", note: "14-day gradient-boosted model" },
+  { icon: Gauge, title: "Virtual Arrival & Bunker Savings", note: "Slow-steaming vs. demurrage trade-off" },
+  { icon: AlarmClock, title: "Port Congestion Cost Exposure", note: "Anchorage queue priced per tonne" },
 ];
 
-const AVATARS = [
-  { initials: "RK", tone: "from-amber-300 to-amber-600" },
-  { initials: "SM", tone: "from-sky-300 to-blue-600" },
-  { initials: "AV", tone: "from-emerald-300 to-teal-600" },
-  { initials: "PN", tone: "from-rose-300 to-rose-600" },
+// Replaced the placeholder testimonial card: the review count and star rating
+// were invented. These four numbers are read straight off the running system.
+const PROOF = [
+  { value: "12", label: "Priced routings" },      // 3 origins x 4 discharge ports
+  { value: "0.71", label: "14-day model R²" },    // ml_engine.MODEL_R2[14]
+  { value: "9", label: "Model features" },        // ml_engine.FEATURE_ORDER
+  { value: "3", label: "Steel plants served" },   // domain.PLANTS
 ];
 
 export default function About() {
@@ -65,8 +70,9 @@ export default function About() {
 
             {/* glass tag, top-left */}
             <div className="glass absolute left-5 top-5 rounded-xl px-3.5 py-2">
-              <p className="font-mono text-[9px] tracking-[0.2em] text-amber-300">LIVE BERTH</p>
-              <p className="mt-0.5 text-xs font-semibold text-white">Visakhapatnam · EQ-4</p>
+              {/* Figures from domain.PORTS — no berth telemetry exists to be "live". */}
+              <p className="font-mono text-[9px] tracking-[0.2em] text-amber-300">DISCHARGE PORT</p>
+              <p className="mt-0.5 text-xs font-semibold text-white">Visakhapatnam · 18.1 m draft</p>
             </div>
 
             <div className="pointer-events-none absolute inset-0 rounded-3xl ring-1 ring-inset ring-white/10" />
@@ -77,34 +83,22 @@ export default function About() {
             data-reveal="badge"
             className="glass-gold absolute -bottom-8 left-4 right-4 rounded-2xl p-4 shadow-[0_30px_60px_-25px_rgba(0,0,0,.95)] sm:-bottom-10 sm:left-8 sm:right-auto sm:w-[356px] sm:p-5"
           >
-            <div className="flex items-center gap-3">
-              <div className="flex -space-x-2.5">
-                {AVATARS.map((a) => (
-                  <span
-                    key={a.initials}
-                    className={`grid h-9 w-9 place-items-center rounded-full bg-gradient-to-br ${a.tone} text-[10px] font-bold text-slate-900 ring-2 ring-[#0b1a30]`}
-                  >
-                    {a.initials}
+            <div className="grid grid-cols-4 gap-2">
+              {PROOF.map((s) => (
+                <div key={s.label} className="flex flex-col items-center text-center">
+                  <span className="font-display text-lg font-extrabold leading-none text-amber-300">
+                    {s.value}
                   </span>
-                ))}
-                <span className="grid h-9 w-9 place-items-center rounded-full bg-[#13294d] text-[9px] font-bold text-amber-300 ring-2 ring-[#0b1a30]">
-                  +40
-                </span>
-              </div>
-
-              <div className="flex flex-col">
-                <div className="flex items-center gap-1">
-                  {[0, 1, 2, 3, 4].map((i) => (
-                    <Star key={i} size={13} className="fill-amber-400 text-amber-400" />
-                  ))}
-                  <span className="ml-1 text-[11px] font-bold text-white">5.0</span>
+                  <span className="mt-1 text-[9px] leading-tight text-blue-200/60">
+                    {s.label}
+                  </span>
                 </div>
-                <span className="text-[10px] text-blue-200/60">128 verified reviews</span>
-              </div>
+              ))}
             </div>
 
             <p className="mt-3 border-t border-amber-400/20 pt-3 text-[12.5px] font-semibold leading-snug text-blue-50">
-              Trusted by Top Supply Chain &amp; Procurement Teams
+              Every routing priced end to end — FOB, ocean freight, demurrage,
+              FOIS rail and stockyard holding.
             </p>
           </div>
         </div>

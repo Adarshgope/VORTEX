@@ -50,12 +50,14 @@ const LINKS = [
     ],
   },
   {
+    // The four discharge ports in backend/app/domain.py — Chennai, Ennore,
+    // Gangavaram, Krishnapatnam and Kakinada were never modelled and are gone.
     heading: "Ports Covered",
     items: [
-      { label: "Visakhapatnam · Gangavaram", to: "/dashboard" },
-      { label: "Paradip · Haldia", to: "/dashboard" },
-      { label: "Chennai · Ennore", to: "/dashboard" },
-      { label: "Krishnapatnam · Kakinada", to: "/dashboard" },
+      { label: "Paradip · Odisha", to: "/dashboard" },
+      { label: "Dhamra · Odisha", to: "/dashboard" },
+      { label: "Visakhapatnam · Andhra Pradesh", to: "/dashboard" },
+      { label: "Haldia · West Bengal", to: "/dashboard" },
     ],
   },
 ];

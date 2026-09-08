@@ -1,3 +1,17 @@
+# ---------------------------------------------------------------------------
+# VORTEX backend — Flask API serving the ML freight models and the sourcing
+# optimiser. Install with:
+#
+#     python -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+#
+# Package set is derived from the imports actually present in ../../ML: bs4,
+# joblib, numpy, pandas, plotly, pulp, requests, sklearn, streamlit, yfinance.
+# `ML/requirements.txt` is a machine-wide `pip freeze` (torch, tensorflow-macos,
+# keras, lightgbm, wordcloud …) — nothing in the ML source imports any of it, so
+# it is deliberately not mirrored here.
+# ---------------------------------------------------------------------------
+
+# --- web layer -------------------------------------------------------------
 Flask==3.0.3
 flask-cors==4.0.1
 pymongo==4.8.0
@@ -11,3 +25,21 @@ scipy>=1.13
 joblib>=1.4
 scikit-learn==1.9.0
 pandas>=2.2
+
+# --- live market data pipeline (ported from ML/data.py, ML/src/run_all_data.py)
+# yfinance pulls the same three daily series the models were trained on —
+# BDRY (freight), BZ=F (Brent) and USDINR=X — so the API forecasts from today's
+# market instead of the frozen training CSV. openpyxl reads the World Bank
+# monthly "Pink Sheet" .xlsx that ML/wordbank.py ingests.
+yfinance>=0.2.40
+openpyxl>=3.1.2
+
+# --- live port congestion (ported from ML/app.py get_live_port_congestion) ---
+requests>=2.31
+beautifulsoup4>=4.12
+lxml>=5.0
+
+# --- sourcing optimiser ----------------------------------------------------
+# ML/app.py states the allocation as a PuLP linear program; steel_engine solves
+# the identical program and falls back to its closed form if PuLP is absent.
+PuLP>=2.8

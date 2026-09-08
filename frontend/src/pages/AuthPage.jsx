@@ -69,14 +69,16 @@ export default function AuthPage({ mode }) {
             Charter with the market, not against it.
           </h2>
           <p className="mt-4 max-w-md text-sm leading-relaxed text-blue-100/65">
-            Live freight indices, port constraint envelopes and 60-day rate
-            forecasts across ten east coast Indian ports.
+            Live freight indices, berth constraint envelopes and 14-day
+            rate forecasts across the east coast bulk corridor.
           </p>
+          {/* Counts read off backend/app/domain.py: 4 ports, 3 vessel classes,
+              3 origins x 4 ports = 12 priced trade lanes. */}
           <div className="mt-8 flex gap-8">
             {[
-              ["10", "Ports mapped"],
-              ["7", "Vessel classes"],
-              ["14", "Trade lanes"],
+              ["4", "Ports mapped"],
+              ["3", "Vessel classes"],
+              ["12", "Trade lanes"],
             ].map(([v, l]) => (
               <div key={l}>
                 <p className="font-display text-2xl font-extrabold text-amber-300">{v}</p>

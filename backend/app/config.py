@@ -50,7 +50,10 @@ if MONGO_URI and MONGO_PASSWORD:
 MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "user-info")
 MONGO_USERS_COLLECTION = os.environ.get("MONGO_USERS_COLLECTION", "user-details")
 
-PORT = int(os.environ.get("PORT", 5000))
+# 5050, not 5000: on macOS Control Center's AirPlay Receiver owns 5000 and
+# answers every HTTP request with an empty 403. A frontend pointed there falls
+# silently into demo mode, which is indistinguishable from "nothing works".
+PORT = int(os.environ.get("PORT", 5050))
 HOST = os.environ.get("HOST", "0.0.0.0")
 DEBUG = os.environ.get("FLASK_DEBUG", "1") == "1"
 

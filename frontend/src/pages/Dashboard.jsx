@@ -2,14 +2,20 @@
  * The post-login application shell.
  *
  * One screen, not a tab stack: controls on the left, the sourcing decision on
- * the right. Everything below the header is driven by a single scenario object
- * posted to `/api/steel/plan`, which carries the optimiser result and the
- * freight-model forecast in one payload.
+ * the right. A single scenario object drives two services:
+ *
+ *   POST /api/steel/plan      the routing optimiser, ledger and tactical call
+ *   POST /api/predict/freight the freight-index model behind the forecast chart
+ *
+ * Both are derived from the same controls, so the panels stay consistent while
+ * each half keeps rendering if the other fails.
  */
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Container, LogOut, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import {
+  Container, LogOut, PanelLeftClose, PanelLeftOpen, RefreshCw, WifiOff,
+} from "lucide-react";
 import ControlPanel from "../components/dashboard/ControlPanel";
 import MetricsBar, { TacticalBanner } from "../components/dashboard/MetricsBar";
 import SourcingPlan from "../components/dashboard/SourcingPlan";
@@ -18,7 +24,7 @@ import Ledger from "../components/dashboard/Ledger";
 import ForecastPanel from "../components/dashboard/ForecastPanel";
 import { useAuth } from "../lib/authContext";
 import { useApi, useCompute, useHealth } from "../lib/useApi";
-import { API_BASE, endpoints } from "../lib/api";
+import { API_LABEL, endpoints, refreshLiveData } from "../lib/api";
 
 /** Until `/api/steel/options` lands, drive the panel from these. */
 const SEED = {
@@ -26,12 +32,10 @@ const SEED = {
   vessel: "capesize",
   volume_t: 150000,
   crude_shock_pct: 0,
-  vlsfo_usd_per_t: 654,
-  usd_inr: 96.28,
-  bdry: 12.19,
+  port_delay_days: 0,
+  godown_rate_inr: 48,
   slow_steaming: true,
-  horizon: 14,
-  vlsfo_touched: false,
+  godown_touched: false,
 };
 
 export default function Dashboard() {
@@ -45,14 +49,16 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const health = useHealth();
 
-  const { data: options } = useApi("steelOptions", endpoints.steelOptions());
+  const {
+    data: options, refresh: refreshOptions,
+  } = useApi("steelOptions", endpoints.steelOptions());
 
   const scenario = useMemo(
     () => ({ ...SEED, ...(options?.defaults || {}), ...overrides }),
     [options, overrides]
   );
 
-  // `vlsfo_touched` is panel state, not a model input, so the body is built
+  // `godown_touched` is panel state, not a model input, so the body is built
   // field by field rather than by stripping keys out of the scenario.
   const body = useMemo(
     () => ({
@@ -60,16 +66,80 @@ export default function Dashboard() {
       vessel: scenario.vessel,
       volume_t: scenario.volume_t === "" ? 10000 : scenario.volume_t,
       crude_shock_pct: scenario.crude_shock_pct,
-      vlsfo_usd_per_t: scenario.vlsfo_usd_per_t,
-      usd_inr: scenario.usd_inr,
-      bdry: scenario.bdry,
+      port_delay_days: scenario.port_delay_days,
+      godown_rate_inr: scenario.godown_rate_inr,
       slow_steaming: scenario.slow_steaming,
-      horizon: scenario.horizon,
     }),
     [scenario]
   );
 
-  const { data: plan, source } = useCompute("steelPlan", endpoints.steelPlan(), body);
+  const {
+    data: plan, source, error: planError, reason: planReason, refresh: refreshPlan,
+  } = useCompute("steelPlan", endpoints.steelPlan(), body);
+
+  /**
+   * The freight forecast is fetched from the model service in its own right
+   * rather than read off the sourcing plan, so `/api/predict/freight` is the
+   * component's actual data source and the chart still renders if the
+   * optimiser errors. Its inputs are the ML/app.py curve inputs: crude shock,
+   * port congestion spike, godown rate and the vessel class.
+   */
+  const forecastBody = useMemo(
+    () => ({
+      crude_shock_pct: scenario.crude_shock_pct,
+      port_delay_days: scenario.port_delay_days,
+      godown_rate_inr: scenario.godown_rate_inr,
+      vessel: scenario.vessel,
+    }),
+    [scenario.crude_shock_pct, scenario.port_delay_days, scenario.godown_rate_inr, scenario.vessel]
+  );
+
+  const {
+    data: forecast, source: forecastSource, error: forecastError, refresh: refreshForecast,
+  } = useCompute("predictFreight", endpoints.predictFreight(), forecastBody);
+
+  // While the dedicated call is still in flight — or if it failed outright —
+  // the plan carries its own copy of the same forecast. Use it so one dead
+  // endpoint degrades to the other rather than to an empty panel.
+  const liveForecast = forecast || plan?.forecast;
+
+  // Start-up race: /api/steel/options can land on the CSV baseline a few
+  // seconds before the backend's live macro pull finishes. When the first plan
+  // comes back flagged live and the options block is not, re-pull options so
+  // the sliders re-seed to today's market instead of a stale snapshot.
+  const planIsLive = plan?.macro?.is_live;
+  const optionsIsLive = options?.macro?.is_live;
+  useEffect(() => {
+    if (planIsLive && options && !optionsIsLive) refreshOptions();
+  }, [planIsLive, optionsIsLive, options, refreshOptions]);
+
+  // Any panel on the mirror means the API is not being reached.
+  const demo = source === "demo" || forecastSource === "demo";
+
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshNote, setRefreshNote] = useState("");
+
+  const pullLiveData = useCallback(async () => {
+    setRefreshing(true);
+    setRefreshNote("");
+    try {
+      const res = await refreshLiveData();
+      setRefreshNote(
+        res.refreshed
+          ? `Market data updated — BDRY ${res.macro?.bdry} as of ${res.macro?.as_of}`
+          : `Already current — BDRY ${res.macro?.bdry} as of ${res.macro?.as_of}`
+      );
+      // Re-seed the sliders and re-run both services against the new macro.
+      refreshOptions();
+      refreshPlan();
+      refreshForecast();
+    } catch (err) {
+      setRefreshNote(`Live feed unavailable — ${err.message}`);
+    } finally {
+      setRefreshing(false);
+      setTimeout(() => setRefreshNote(""), 6000);
+    }
+  }, [refreshOptions, refreshPlan, refreshForecast]);
 
   const logout = () => {
     signOut();
@@ -110,8 +180,26 @@ export default function Dashboard() {
           </Link>
 
           <div className="ml-auto flex items-center gap-3">
+            {refreshNote && (
+              <span className="hidden max-w-[320px] truncate rounded-full bg-blue-500/12 px-2.5 py-1 text-[10px] font-semibold text-blue-200/80 lg:inline-block">
+                {refreshNote}
+              </span>
+            )}
+
+            <button
+              onClick={pullLiveData}
+              disabled={refreshing}
+              title="Re-pull the live market feed (BDRY, Brent, USD/INR)"
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-blue-500/25 px-2.5 text-[10.5px] font-semibold text-blue-200/70 transition-colors hover:border-amber-400/50 hover:text-amber-300 disabled:opacity-50"
+            >
+              <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} />
+              <span className="hidden md:inline">
+                {refreshing ? "Syncing…" : "Sync market"}
+              </span>
+            </button>
+
             <span
-              title={health.detail || API_BASE}
+              title={health.detail || API_LABEL}
               className={`hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-bold tracking-wider sm:inline-flex ${
                 health.online === null
                   ? "bg-slate-500/12 text-slate-300"
@@ -157,6 +245,21 @@ export default function Dashboard() {
         </div>
       </header>
 
+      {demo && (
+        <div className="border-b border-amber-400/25 bg-amber-400/10 px-4 py-2 sm:px-6">
+          <p className="flex items-start gap-2 text-[11.5px] leading-snug text-amber-100/90">
+            <WifiOff size={14} className="mt-0.5 shrink-0 text-amber-300" />
+            <span>
+              <span className="font-bold text-amber-300">Showing the in-browser mirror, not the API.</span>{" "}
+              {planReason || health.detail || "Flask is not answering."} Start it with{" "}
+              <code className="rounded bg-black/30 px-1 font-mono text-[10.5px]">./start_dev.sh</code>{" "}
+              (or <code className="rounded bg-black/30 px-1 font-mono text-[10.5px]">python run.py</code> on
+              port 5050) and this strip disappears.
+            </span>
+          </p>
+        </div>
+      )}
+
       {/* ---------------------------------------------------------- content */}
       <div className="mx-auto max-w-[1680px] px-4 py-6 sm:px-6">
         <div
@@ -174,16 +277,21 @@ export default function Dashboard() {
           )}
 
           <main className="min-w-0 space-y-5">
-            <TacticalBanner tactical={plan?.tactical} />
-            <MetricsBar plan={plan} />
-            <SourcingPlan plan={plan} source={source} />
+            <TacticalBanner tactical={plan?.tactical} error={planError} onRetry={refreshPlan} />
+            <MetricsBar plan={plan} forecast={liveForecast} error={planError} onRetry={refreshPlan} />
+            <SourcingPlan plan={plan} source={source} error={planError} onRetry={refreshPlan} />
 
             <div className="grid gap-5 lg:grid-cols-2">
-              <CostBreakdown plan={plan} />
-              <Ledger plan={plan} />
+              <CostBreakdown plan={plan} error={planError} onRetry={refreshPlan} />
+              <Ledger plan={plan} error={planError} onRetry={refreshPlan} />
             </div>
 
-            <ForecastPanel forecast={plan?.forecast} />
+            <ForecastPanel
+              forecast={liveForecast}
+              source={forecast ? forecastSource : source}
+              error={forecastError}
+              onRetry={refreshForecast}
+            />
           </main>
         </div>
       </div>

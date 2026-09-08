@@ -31,6 +31,42 @@ export function Skeleton({ className = "h-4 w-full" }) {
   return <div className={`animate-pulse rounded bg-blue-500/10 ${className}`} />;
 }
 
+/**
+ * What a panel shows when its request failed and nothing usable came back.
+ * A skeleton that never resolves looks like slowness; this says what happened
+ * and offers the retry, so one dead metric does not read as a dead dashboard.
+ */
+export function ErrorState({ title = "Couldn't load this panel", message, onRetry, compact = false }) {
+  return (
+    <div
+      role="alert"
+      className={`flex items-start gap-3 rounded-xl border border-rose-500/25 bg-rose-500/8 ${
+        compact ? "p-3" : "p-4"
+      }`}
+    >
+      <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full bg-rose-500/15 font-mono text-[11px] font-bold text-rose-300">
+        !
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-[12.5px] font-semibold text-rose-200">{title}</p>
+        {message && (
+          <p className="mt-0.5 break-words text-[11px] leading-relaxed text-blue-100/60">
+            {message}
+          </p>
+        )}
+      </div>
+      {onRetry && (
+        <button
+          onClick={onRetry}
+          className="shrink-0 rounded-md border border-rose-400/30 px-2 py-1 text-[10.5px] font-semibold text-rose-200 transition-colors hover:bg-rose-500/15"
+        >
+          Retry
+        </button>
+      )}
+    </div>
+  );
+}
+
 /* --------------------------------------------------------------- controls */
 
 export function Segmented({ options, value, onChange, size = "md", full = false }) {

@@ -1,7 +1,7 @@
 /** Tactical action banner plus the four live macro readings. */
 
 import { AlertTriangle, CheckCircle2, TrendingDown, TrendingUp } from "lucide-react";
-import { Metric, Skeleton } from "./ui";
+import { ErrorState, Metric, Skeleton } from "./ui";
 import { num, pct, usd } from "../../lib/format";
 
 const BANNER = {
@@ -22,8 +22,12 @@ const BANNER = {
   },
 };
 
-export function TacticalBanner({ tactical }) {
-  if (!tactical) return <Skeleton className="h-[74px] w-full rounded-2xl" />;
+export function TacticalBanner({ tactical, error, onRetry }) {
+  if (!tactical) {
+    return error
+      ? <ErrorState title="Sourcing plan unavailable" message={error} onRetry={onRetry} />
+      : <Skeleton className="h-[74px] w-full rounded-2xl" />;
+  }
   const tone = BANNER[tactical.level] || BANNER.warning;
   const Icon = tone.icon;
 
@@ -40,8 +44,26 @@ export function TacticalBanner({ tactical }) {
   );
 }
 
-export default function MetricsBar({ plan }) {
+/** "2026-09-08" -> "8 Sep". Bare dates only; no timezone shifting. */
+function shortDate(iso) {
+  if (!iso) return "";
+  const [y, m, d] = String(iso).slice(0, 10).split("-").map(Number);
+  if (!y || !m || !d) return String(iso);
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${d} ${MONTHS[m - 1]}`;
+}
+
+/**
+ * `forecast` is the dedicated `/api/predict/freight` result. It falls back to
+ * the copy embedded in the plan so the tiles still fill while that call is in
+ * flight.
+ */
+export default function MetricsBar({ plan, forecast: forecastProp, error, onRetry }) {
   if (!plan?.macro) {
+    if (error) {
+      return <ErrorState title="Market readings unavailable" message={error} onRetry={onRetry} compact />;
+    }
     return (
       <div className="grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
         {Array.from({ length: 4 }).map((_, i) => (
@@ -53,9 +75,16 @@ export default function MetricsBar({ plan }) {
     );
   }
 
-  const { macro, forecast } = plan;
+  const { macro } = plan;
+  const forecast = forecastProp || plan.forecast;
   const rising = forecast.change_pct >= 0;
   const Arrow = rising ? TrendingUp : TrendingDown;
+
+  // Say plainly whether these are live quotes or the bundled training snapshot.
+  const asOf = shortDate(macro.as_of);
+  const feedNote = macro.is_live
+    ? `Live feed · ${asOf}`
+    : `Training snapshot · ${asOf}`;
 
   return (
     <div className="grid gap-3.5 sm:grid-cols-2 xl:grid-cols-4">
@@ -81,8 +110,8 @@ export default function MetricsBar({ plan }) {
         accent="text-white"
         footer={
           macro.crude_shock_pct
-            ? `${pct(macro.crude_shock_pct, 0)} shock applied`
-            : "At live spot — no shock applied"
+            ? `${pct(macro.crude_shock_pct, 0)} shock applied · ${feedNote}`
+            : `No shock applied · ${feedNote}`
         }
       />
       <Metric
@@ -90,14 +119,14 @@ export default function MetricsBar({ plan }) {
         value={usd(macro.vlsfo_usd_per_t, 0)}
         unit="/MT"
         accent="text-white"
-        footer="Drives the slow-steaming trade-off"
+        footer="Brent × 7.33 parity · drives the slow-steaming trade-off"
       />
       <Metric
         label="Forex · USD/INR"
         value={`₹${num(macro.usd_inr, 2)}`}
         unit="/$"
         accent="text-white"
-        footer="Converts every seaborne leg to rupees"
+        footer={`Converts every seaborne leg to rupees · ${feedNote}`}
       />
     </div>
   );

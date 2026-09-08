@@ -1,13 +1,14 @@
 """
 VORTEX backend entry point.
 
-    python run.py            # http://localhost:5000
+    python run.py            # http://localhost:5050
 
-macOS note: Control Center's AirPlay Receiver also listens on 5000. If the port
-is busy, run on another one and point the frontend at it:
+The default is 5050 rather than Flask's usual 5000 because on macOS Control
+Center's AirPlay Receiver owns 5000. If 5050 is busy, pick another and tell the
+frontend's dev proxy where to look:
 
-    PORT=5050 python run.py
-    VITE_API_URL=http://localhost:5050 npm run dev
+    PORT=5051 python run.py
+    VITE_API_URL=http://127.0.0.1:5051 npm run dev
 """
 
 import os
@@ -47,9 +48,9 @@ if __name__ == "__main__":
             print("  or start on another port:")
         else:
             print("  Start on another port:")
-        print("      PORT=5050 python run.py")
-        print("  and point the frontend at it:")
-        print("      VITE_API_URL=http://localhost:5050 npm run dev")
+        print(f"      PORT={config.PORT + 1} python run.py")
+        print("  and point the frontend's dev proxy at it:")
+        print(f"      VITE_API_URL=http://127.0.0.1:{config.PORT + 1} npm run dev")
         print("=" * 68)
         sys.exit(1)
 

@@ -11,7 +11,9 @@ import { fetchOrFallback } from "./api";
  * Returns { data, loading, error, source, refresh }.
  */
 export function useApi(key, path, { args, poll = 0, enabled = true } = {}) {
-  const [state, setState] = useState({ data: null, loading: true, error: null, source: null });
+  const [state, setState] = useState({
+    data: null, loading: true, error: null, source: null, reason: null,
+  });
   const [nonce, setNonce] = useState(0);
   const argsKey = JSON.stringify(args ?? null);
 
@@ -21,10 +23,13 @@ export function useApi(key, path, { args, poll = 0, enabled = true } = {}) {
 
     const run = async () => {
       try {
-        const { data, source } = await fetchOrFallback(key, path, { args: JSON.parse(argsKey) });
-        if (alive) setState({ data, loading: false, error: null, source });
+        const { data, source, reason } =
+          await fetchOrFallback(key, path, { args: JSON.parse(argsKey) });
+        if (alive) setState({ data, loading: false, error: null, source, reason: reason || null });
       } catch (err) {
-        if (alive) setState({ data: null, loading: false, error: err.message, source: null });
+        // Keep whatever was on screen; only flag the failure. A transient
+        // error must not wipe a panel that was rendering a moment ago.
+        if (alive) setState((s) => ({ ...s, loading: false, error: err.message }));
       }
     };
 
@@ -46,26 +51,31 @@ export function useApi(key, path, { args, poll = 0, enabled = true } = {}) {
  * cost model, both of which recompute as the operator edits inputs.
  */
 export function useCompute(key, path, body, { debounce = 260 } = {}) {
-  const [state, setState] = useState({ data: null, loading: true, error: null, source: null });
+  const [state, setState] = useState({
+    data: null, loading: true, error: null, source: null, reason: null,
+  });
+  const [nonce, setNonce] = useState(0);
   const bodyKey = JSON.stringify(body);
 
   useEffect(() => {
     let alive = true;
+    setState((s) => ({ ...s, loading: true }));
     const timer = setTimeout(async () => {
       try {
-        const { data, source } = await fetchOrFallback(key, path, {
+        const { data, source, reason } = await fetchOrFallback(key, path, {
           method: "POST", body: JSON.parse(bodyKey),
         });
-        if (alive) setState({ data, loading: false, error: null, source });
+        if (alive) setState({ data, loading: false, error: null, source, reason: reason || null });
       } catch (err) {
-        if (alive) setState({ data: null, loading: false, error: err.message, source: null });
+        if (alive) setState((s) => ({ ...s, loading: false, error: err.message }));
       }
     }, debounce);
 
     return () => { alive = false; clearTimeout(timer); };
-  }, [key, path, bodyKey, debounce]);
+  }, [key, path, bodyKey, debounce, nonce]);
 
-  return state;
+  const refresh = useCallback(() => setNonce((n) => n + 1), []);
+  return { ...state, refresh };
 }
 
 /** Backend liveness probe for the header badge. */
@@ -79,8 +89,9 @@ export function useHealth(intervalMs = 20000) {
       try {
         const { data, source } = await fetchOrFallback("__health", "/api/health");
         if (alive) setHealth({ online: source === "live", detail: data?.database?.detail || "" });
-      } catch {
-        if (alive) setHealth({ online: false, detail: "Backend unreachable — showing demo data" });
+      } catch (err) {
+        // Say *where* it looked, so a wrong port is diagnosable from the pill.
+        if (alive) setHealth({ online: false, detail: `${err.message} · showing in-browser mirror` });
       }
     };
 

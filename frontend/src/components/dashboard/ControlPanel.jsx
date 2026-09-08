@@ -1,18 +1,18 @@
 /**
- * Sourcing controls — the left rail.
+ * Sourcing controls — the left rail, mirroring ML/app.py's sidebar control for
+ * control: destination plant, order volume, vessel class, the three stress-test
+ * sliders (Brent crude shock, simulated port congestion spike, plant godown
+ * rate) and the Virtual Arrival toggle.
  *
- * Everything the optimiser and the freight models take as input lives here, so
- * the right-hand side is purely output. Changing anything re-runs the plan.
+ * Nothing else. The forecast horizon is fixed at 14 days, and BDRY, Brent,
+ * VLSFO and USD/INR are live readings shown in the metric tiles, not inputs.
  */
 
 import { RotateCcw } from "lucide-react";
 import { Panel, Segmented, Slider, Toggle } from "./ui";
 import { num, usd } from "../../lib/format";
 
-const HORIZONS = [
-  { label: "14-Day", value: 14 },
-  { label: "30-Day", value: 30 },
-];
+const VLSFO_CRUDE_PARITY = 7.33;
 
 export default function ControlPanel({ options, scenario, onChange, onReset }) {
   const plants = options?.plants || [];
@@ -22,21 +22,19 @@ export default function ControlPanel({ options, scenario, onChange, onReset }) {
   const set = (key) => (value) => onChange({ ...scenario, [key]: value });
 
   /**
-   * Bunkers price off Brent at a fixed parity, so moving the crude shock drags
-   * VLSFO with it — until the operator overrides bunkers directly, after which
-   * their number is respected. `vlsfo_touched` is what remembers that.
+   * ML/app.py seeds its godown slider from plant_godown_rates[selected_plant],
+   * so changing the plant moves the rate — until the operator drags it, after
+   * which their figure sticks. `godown_touched` is what remembers that.
    */
-  const setCrudeShock = (pct) => {
-    const next = { ...scenario, crude_shock_pct: pct };
-    if (!scenario.vlsfo_touched && options?.macro) {
-      next.vlsfo_usd_per_t = Math.round(
-        options.macro.brent_usd * (1 + pct / 100) * 7.33);
-    }
+  const setPlant = (id) => {
+    const next = { ...scenario, plant: id };
+    const plant = plants.find((p) => p.id === id);
+    if (!scenario.godown_touched && plant) next.godown_rate_inr = plant.godown_rate_inr;
     onChange(next);
   };
 
-  const setVlsfo = (value) =>
-    onChange({ ...scenario, vlsfo_usd_per_t: value, vlsfo_touched: true });
+  const setGodown = (value) =>
+    onChange({ ...scenario, godown_rate_inr: value, godown_touched: true });
 
   const brentNow = options?.macro
     ? options.macro.brent_usd * (1 + scenario.crude_shock_pct / 100)
@@ -45,7 +43,7 @@ export default function ControlPanel({ options, scenario, onChange, onReset }) {
   return (
     <Panel
       title="Sourcing Controls"
-      subtitle="Order, fleet and macro stress test"
+      subtitle="Order, fleet and stress test"
       action={
         <button
           onClick={onReset}
@@ -65,7 +63,7 @@ export default function ControlPanel({ options, scenario, onChange, onReset }) {
             <select
               className="field"
               value={scenario.plant}
-              onChange={(e) => set("plant")(e.target.value)}
+              onChange={(e) => setPlant(e.target.value)}
             >
               {plants.map((p) => (
                 <option key={p.id} value={p.id} className="bg-[#0a192f]">
@@ -109,10 +107,10 @@ export default function ControlPanel({ options, scenario, onChange, onReset }) {
           </div>
         </div>
 
-        {/* --------------------------------------------- macro stress test */}
+        {/* ---------------------------------- market, port & stockyard test */}
         <div className="space-y-4 border-t border-blue-500/10 pt-4">
           <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-amber-300/80">
-            Macro stress test
+            Market, port &amp; stockyard stress test
           </p>
 
           <Slider
@@ -122,72 +120,52 @@ export default function ControlPanel({ options, scenario, onChange, onReset }) {
             min={limits?.crude_shock_pct.min ?? -30}
             max={limits?.crude_shock_pct.max ?? 50}
             step={limits?.crude_shock_pct.step ?? 5}
-            onChange={setCrudeShock}
+            onChange={set("crude_shock_pct")}
             format={(v) => `${v > 0 ? "+" : ""}${v}`}
-            hint={brentNow ? `Brent ${usd(brentNow, 2)}/bbl` : undefined}
-          />
-
-          <Slider
-            label="Bunker fuel · VLSFO"
-            unit="$/MT"
-            value={scenario.vlsfo_usd_per_t}
-            min={limits?.vlsfo_usd_per_t.min ?? 350}
-            max={limits?.vlsfo_usd_per_t.max ?? 1150}
-            step={limits?.vlsfo_usd_per_t.step ?? 5}
-            onChange={setVlsfo}
-            format={(v) => num(v, 0)}
             hint={
-              scenario.vlsfo_touched
-                ? "Manual override — Reset restores Brent parity"
-                : "Tracking Brent at 7.33 parity"
+              brentNow
+                ? `Brent ${usd(brentNow, 2)}/bbl · VLSFO ${usd(brentNow * VLSFO_CRUDE_PARITY, 0)}/MT`
+                : "Moves bunker cost and the forward freight curve"
             }
           />
 
           <Slider
-            label="Forex · USD/INR"
-            unit="₹/$"
-            value={scenario.usd_inr}
-            min={limits?.usd_inr.min ?? 80}
-            max={limits?.usd_inr.max ?? 106}
-            step={limits?.usd_inr.step ?? 0.25}
-            onChange={set("usd_inr")}
-            format={(v) => num(v, 2)}
+            label="Port congestion spike"
+            unit="days"
+            value={scenario.port_delay_days}
+            min={limits?.port_delay_days.min ?? 0}
+            max={limits?.port_delay_days.max ?? 8}
+            step={limits?.port_delay_days.step ?? 0.5}
+            onChange={set("port_delay_days")}
+            format={(v) => num(v, 1)}
+            hint="Added on top of every port's reference anchorage queue — breakdowns, weather shut-ins"
           />
 
           <Slider
-            label="Baltic dry index · BDRY"
-            unit="pts"
-            value={scenario.bdry}
-            min={limits?.bdry.min ?? 6}
-            max={limits?.bdry.max ?? 22}
-            step={limits?.bdry.step ?? 0.05}
-            onChange={set("bdry")}
-            format={(v) => num(v, 2)}
-            hint="Scales ocean freight and seeds the forecast"
+            label="Plant godown / stockyard rate"
+            unit="₹/MT"
+            value={scenario.godown_rate_inr}
+            min={limits?.godown_rate_inr.min ?? 20}
+            max={limits?.godown_rate_inr.max ?? 120}
+            step={limits?.godown_rate_inr.step ?? 2}
+            onChange={setGodown}
+            format={(v) => num(v, 0)}
+            hint={
+              scenario.godown_touched
+                ? "Manual override — Reset restores the plant's own rate"
+                : "Plant default · ground rent, yard handling and holding charge"
+            }
           />
         </div>
 
-        {/* -------------------------------------------------------- toggles */}
-        <div className="space-y-3 border-t border-blue-500/10 pt-4">
+        {/* -------------------------------------------------------- toggle */}
+        <div className="border-t border-blue-500/10 pt-4">
           <Toggle
             label="Virtual arrival (slow-steaming)"
             hint="Meet the berth window instead of paying demurrage at anchorage"
             checked={scenario.slow_steaming}
             onChange={set("slow_steaming")}
           />
-
-          <div>
-            <span className="mb-1.5 block text-[10.5px] font-semibold uppercase tracking-wider text-blue-200/55">
-              Forecast horizon
-            </span>
-            <Segmented
-              full
-              size="sm"
-              options={HORIZONS}
-              value={scenario.horizon}
-              onChange={set("horizon")}
-            />
-          </div>
         </div>
       </div>
     </Panel>

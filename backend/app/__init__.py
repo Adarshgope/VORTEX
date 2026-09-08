@@ -42,8 +42,10 @@ def create_app():
     _install_cors(app)
     init_db()
 
-    # Pull the freight models into memory now rather than on the first request.
-    # A load failure is not fatal — ml_engine falls back to its analytic model.
+    # Pull the freight models into memory now rather than on the first request,
+    # and kick the live macro pull onto a background thread. A load failure is
+    # not fatal — ml_engine falls back to the bundled CSV, then to its analytic
+    # model. Retained for the start-up banner; /api/health reports live state.
     app.config["ML_STATUS"] = ml_engine.warm_up()
 
     for bp in BLUEPRINTS:
@@ -59,7 +61,10 @@ def create_app():
             "version": "1.0.0",
             "time": datetime.now(timezone.utc).isoformat(),
             "database": db_status(),
-            "ml": app.config.get("ML_STATUS", {}),
+            # Read live rather than served from ML_STATUS: the macro feed swaps
+            # in on a background thread after start-up, so the snapshot taken in
+            # create_app() goes stale within seconds of boot.
+            "ml": ml_engine.model_status(),
         })
 
     @app.get("/")

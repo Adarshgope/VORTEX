@@ -4,7 +4,7 @@
  * readable at a glance.
  */
 
-import { Panel, Skeleton } from "./ui";
+import { ErrorState, Panel, Skeleton } from "./ui";
 import { inr } from "../../lib/format";
 
 const LEGS = [
@@ -18,13 +18,15 @@ const LEGS = [
   { key: "godown", label: "Plant godown", color: "#64748b" },
 ];
 
-export default function CostBreakdown({ plan }) {
+export default function CostBreakdown({ plan, error, onRetry }) {
   const breakdown = plan?.allocation?.breakdown;
 
   if (!breakdown) {
     return (
       <Panel title="Multi-Modal Cost Stack" subtitle="Landed cost by leg">
-        <Skeleton className="h-40 w-full" />
+        {error && !plan
+          ? <ErrorState message={error} onRetry={onRetry} />
+          : <Skeleton className="h-40 w-full" />}
       </Panel>
     );
   }
