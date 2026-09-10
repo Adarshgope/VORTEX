@@ -1,8 +1,9 @@
 /**
  * The post-login application shell.
  *
- * One screen, not a tab stack: controls on the left, the sourcing decision on
- * the right. A single scenario object drives two services:
+ * Controls on the left; the sourcing decision on the right, split across three
+ * tabs so only one of the heavy panels is mounted at a time. A single scenario
+ * object drives two services:
  *
  *   POST /api/steel/plan      the routing optimiser, ledger and tactical call
  *   POST /api/predict/freight the freight-index model behind the forecast chart
@@ -38,6 +39,13 @@ const SEED = {
   godown_touched: false,
 };
 
+/** The three result views. Order is the order they are read in. */
+const TABS = [
+  { id: "sourcing", label: "Optimal Sourcing Plan" },
+  { id: "cost", label: "Multi-Modal Cost Stack" },
+  { id: "forecast", label: "Freight Index Forecast" },
+];
+
 export default function Dashboard() {
   // `overrides` holds only what the operator has actually touched. The live
   // scenario is SEED <- server defaults <- overrides, derived during render, so
@@ -45,6 +53,7 @@ export default function Dashboard() {
   // without an effect writing state back into the tree.
   const [overrides, setOverrides] = useState({});
   const [railOpen, setRailOpen] = useState(true);
+  const [tab, setTab] = useState(TABS[0].id);
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
   const health = useHealth();
@@ -279,19 +288,63 @@ export default function Dashboard() {
           <main className="min-w-0 space-y-5">
             <TacticalBanner tactical={plan?.tactical} error={planError} onRetry={refreshPlan} />
             <MetricsBar plan={plan} forecast={liveForecast} error={planError} onRetry={refreshPlan} />
-            <SourcingPlan plan={plan} source={source} error={planError} onRetry={refreshPlan} />
 
-            <div className="grid gap-5 lg:grid-cols-2">
-              <CostBreakdown plan={plan} error={planError} onRetry={refreshPlan} />
-              <Ledger plan={plan} error={planError} onRetry={refreshPlan} />
+            <div
+              role="tablist"
+              aria-label="Sourcing views"
+              className="glass flex gap-1 overflow-x-auto rounded-2xl p-1"
+            >
+              {TABS.map((t) => {
+                const active = t.id === tab;
+                return (
+                  <button
+                    key={t.id}
+                    id={`tab-${t.id}`}
+                    role="tab"
+                    type="button"
+                    aria-selected={active}
+                    aria-controls={`panel-${t.id}`}
+                    onClick={() => setTab(t.id)}
+                    className={`flex-1 whitespace-nowrap rounded-xl px-4 py-2.5 font-display text-[12.5px] font-bold tracking-wide transition-all ${
+                      active
+                        ? "bg-gradient-to-br from-yellow-300 to-amber-500 text-[#0a192f] shadow-[0_6px_18px_-8px_rgba(234,179,8,.9)]"
+                        : "text-blue-200/60 hover:text-white"
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                );
+              })}
             </div>
 
-            <ForecastPanel
-              forecast={liveForecast}
-              source={forecast ? forecastSource : source}
-              error={forecastError}
-              onRetry={refreshForecast}
-            />
+            {tab === "sourcing" && (
+              <div id="panel-sourcing" role="tabpanel" aria-labelledby="tab-sourcing">
+                <SourcingPlan plan={plan} source={source} error={planError} onRetry={refreshPlan} />
+              </div>
+            )}
+
+            {tab === "cost" && (
+              <div
+                id="panel-cost"
+                role="tabpanel"
+                aria-labelledby="tab-cost"
+                className="grid gap-5 lg:grid-cols-2"
+              >
+                <CostBreakdown plan={plan} error={planError} onRetry={refreshPlan} />
+                <Ledger plan={plan} error={planError} onRetry={refreshPlan} />
+              </div>
+            )}
+
+            {tab === "forecast" && (
+              <div id="panel-forecast" role="tabpanel" aria-labelledby="tab-forecast">
+                <ForecastPanel
+                  forecast={liveForecast}
+                  source={forecast ? forecastSource : source}
+                  error={forecastError}
+                  onRetry={refreshForecast}
+                />
+              </div>
+            )}
           </main>
         </div>
       </div>
