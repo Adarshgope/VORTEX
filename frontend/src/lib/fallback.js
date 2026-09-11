@@ -75,6 +75,14 @@ const FREE_LAYTIME_DAYS = 2.0;
 const MIN_VOLUME_T = 10000;
 const MAX_VOLUME_T = 500000;
 
+// PSU dual-tier framework terms — domain.py's LTC_* constants.
+const LTC_FOB_FACTOR = 0.955;
+const LTC_FREIGHT_FACTOR = 0.96;
+const DEFAULT_SPOT_RATIO_PCT = 30;
+const MAX_VOYAGE_DAY = 20;
+const DEFAULT_VOYAGE_DAY = 4;
+
+const PORT_BY_CODE = Object.fromEntries(PORTS.map((p) => [p.code, p]));
 const PLANT_BY_ID = Object.fromEntries(PLANTS.map((p) => [p.id, p]));
 const VESSEL_BY_ID = Object.fromEntries(VESSELS.map((v) => [v.id, v]));
 const RAIL_BY_PAIR = Object.fromEntries(RAIL_LEGS.map((r) => [`${r.port}|${r.plant}`, r]));
@@ -135,6 +143,11 @@ const CYCLE_FREQ = 0.45;
 const NEUTRAL_BAND = 1.02;
 const BOOK_NOW_DAYS = 3;
 const ESCALATION_PCT = 2.0;
+
+// ml_engine's empirical Brent VaR — 1.645 * daily vol * sqrt(14), in percent.
+const VAR_Z = 1.645;
+const VAR_WINDOW = 63;
+const VAR_FALLBACK_PCT = 14.8;
 
 /** Same deterministic walk ml_engine uses when no CSV ships with the build. */
 function macroSeries(days = 900) {
@@ -212,6 +225,21 @@ export function modelStatus() {
   };
 }
 
+/** ml_engine.crude_var_pct — 14-day 95% VaR on Brent, off the same series. */
+function crudeVarPct() {
+  const crude = MACRO.crude.slice(-(VAR_WINDOW + 1));
+  const returns = [];
+  for (let i = 1; i < crude.length; i++) {
+    if (crude[i - 1]) returns.push(crude[i] / crude[i - 1] - 1);
+  }
+  if (returns.length < 20) return VAR_FALLBACK_PCT;
+  const mean = returns.reduce((a, x) => a + x, 0) / returns.length;
+  const variance = returns.reduce((a, x) => a + (x - mean) ** 2, 0) / (returns.length - 1);
+  const varPct = VAR_Z * Math.sqrt(variance) * Math.sqrt(HORIZON) * 100;
+  if (!Number.isFinite(varPct) || varPct <= 0) return VAR_FALLBACK_PCT;
+  return +clamp(varPct, 0, 50).toFixed(1);
+}
+
 export function macroBaseline() {
   const i = MACRO.bdry.length - 1;
   return {
@@ -221,6 +249,7 @@ export function macroBaseline() {
     as_of: MACRO.dates[i],
     source: MACRO.source,
     is_live: false,
+    crude_var_14d_pct: crudeVarPct(),
   };
 }
 
@@ -347,16 +376,28 @@ function priceRoute(supplier, port, vessel, { plantId, usdInr, vlsfo, slowSteami
     bunkerSaved = 0;
   }
   const freight = supplier.base_freight_usd_per_t * vessel.scale_freight_factor;
+
+  // Spot tier: the index in full, and the anchorage queue is the buyer's.
   const oceanUsd = supplier.fob_usd_per_t + freight + supplier.quality_adj_usd_per_t + port.tariff_usd_per_t
     + demurrage + extraCharter - bunkerSaved;
+
+  // LTC tier: framework discounts, and priority berthing means no queue cost.
+  const ltcFob = supplier.fob_usd_per_t * LTC_FOB_FACTOR;
+  const ltcFreight = freight * LTC_FREIGHT_FACTOR;
+  const oceanLtcUsd = ltcFob + ltcFreight + supplier.quality_adj_usd_per_t + port.tariff_usd_per_t - bunkerSaved;
+
   const [railInr, railKm, railPublished] = railLeg(port.code, plantId);
   const landedInr = oceanUsd * usdInr + railInr + godownInr;
+  const landedLtcInr = oceanLtcUsd * usdInr + railInr + godownInr;
   const r2 = (x) => +x.toFixed(2);
   return {
     feasible: true,
     reason: `Clear to berth at ${port.short}`,
     ocean_usd_per_t: r2(oceanUsd),
     landed_inr_per_t: r2(landedInr),
+    ocean_ltc_usd_per_t: r2(oceanLtcUsd),
+    landed_ltc_inr_per_t: r2(landedLtcInr),
+    ltc_discount_inr_per_t: r2(landedInr - landedLtcInr),
     rail_km: railKm,
     rail_published: railPublished,
     total_wait_days: r2(totalWaitDays),
@@ -368,9 +409,19 @@ function priceRoute(supplier, port, vessel, { plantId, usdInr, vlsfo, slowSteami
       demurrage: r2(demurrage * usdInr), extra_charter: r2(extraCharter * usdInr),
       bunker_saved: r2(-bunkerSaved * usdInr), rail_fois: r2(railInr), godown: r2(godownInr),
     },
+    breakdown_ltc: {
+      fob: r2(ltcFob * usdInr), ocean_freight: r2(ltcFreight * usdInr),
+      grade_adj: r2(supplier.quality_adj_usd_per_t * usdInr), port_handling: r2(port.tariff_usd_per_t * usdInr),
+      demurrage: 0, extra_charter: 0,
+      bunker_saved: r2(-bunkerSaved * usdInr), rail_fois: r2(railInr), godown: r2(godownInr),
+    },
     usd_components: {
       fob: supplier.fob_usd_per_t, freight: r2(freight), grade_adj: supplier.quality_adj_usd_per_t,
       tariff: port.tariff_usd_per_t, demurrage: r2(demurrage), extra_charter: r2(extraCharter), bunker_saved: r2(bunkerSaved),
+    },
+    usd_components_ltc: {
+      fob: r2(ltcFob), freight: r2(ltcFreight), grade_adj: supplier.quality_adj_usd_per_t,
+      tariff: port.tariff_usd_per_t, demurrage: 0, extra_charter: 0, bunker_saved: r2(bunkerSaved),
     },
   };
 }
@@ -386,32 +437,129 @@ export function steelOptions() {
       detail: "Indian Ports Association reference averages. No live berth-queue feed is published for these ports.",
       ports: Object.fromEntries(PORTS.map((p) => [p.code, p.queue_delay_days])),
     },
+    contract_terms: {
+      default_spot_ratio_pct: DEFAULT_SPOT_RATIO_PCT,
+      ltc_fob_discount_pct: +((1 - LTC_FOB_FACTOR) * 100).toFixed(1),
+      ltc_freight_discount_pct: +((1 - LTC_FREIGHT_FACTOR) * 100).toFixed(1),
+    },
     defaults: {
-      plant: PLANTS[0].id, vessel: VESSELS[0].id, volume_t: 150000, crude_shock_pct: 0,
+      plant: PLANTS[0].id, vessel: VESSELS[0].id, volume_t: 150000,
+      spot_ratio_pct: DEFAULT_SPOT_RATIO_PCT, crude_shock_pct: base.crude_var_14d_pct,
       port_delay_days: 0, godown_rate_inr: PLANTS[0].godown_rate_inr, slow_steaming: true,
+      track_in_transit: true, voyage_day: DEFAULT_VOYAGE_DAY,
     },
     limits: {
       volume_t: { min: MIN_VOLUME_T, max: MAX_VOLUME_T, step: 10000 },
-      crude_shock_pct: { min: -30, max: 50, step: 5 },
+      spot_ratio_pct: { min: 0, max: 100, step: 5 },
+      crude_shock_pct: { min: -30, max: 50, step: 1 },
       port_delay_days: { min: 0, max: 8, step: 0.5 },
       godown_rate_inr: { min: 20, max: 120, step: 2 },
+      voyage_day: { min: 1, max: MAX_VOYAGE_DAY, step: 1 },
     },
     model: modelStatus(),
   };
 }
 
-function tactical(forecast) {
+const fmtMt = (t) => `${Math.round(t).toLocaleString("en-US")} MT`;
+
+function tactical(forecast, spotRatioPct, spotVolume) {
   const p = forecast.change_pct;
   const sign = p > 0 ? "+" : "";
+  const tranche = `${spotRatioPct.toFixed(0)}% spot allocation (${fmtMt(spotVolume)})`;
   if (forecast.escalating) {
     return { level: "critical", action: "ADVANCE SPOT CHARTER BOOKINGS",
-      detail: `The 14-day ML engine (R² = ${R2}) projects freight to rise by ${sign}${p.toFixed(2)}%. Lock vessel fixtures immediately to hedge against escalation.` };
+      detail: `The 14-day ML engine (R² = ${R2}) projects freight to rise by ${sign}${p.toFixed(2)}%. Lock vessel fixtures immediately for the ${tranche} to hedge against rate escalation.` };
   }
-  return { level: "clear", action: "STAGGER CHARTER CONTRACTS",
-    detail: `14-day freight outlook remains stable/soft (${sign}${p.toFixed(2)}%). Rely on safety buffer stock and negotiate spot charter discounts.` };
+  return { level: "clear", action: "STAGGER SPOT CHARTER CONTRACTS",
+    detail: `14-day freight outlook remains stable/soft (${sign}${p.toFixed(2)}%). Rely on the baseload LTC inventory and schedule spot auction bidding for the ${tranche} on day ${forecast.best_entry.day} (${forecast.best_entry.weekday}).` };
 }
 
-/** steel_engine.plan — same inputs, same ledger, closed-form allocation. */
+/** steel_engine._telemetry — the mid-voyage card for the allocated routing. */
+function telemetryFor(route, vessel, { tracking, voyageDay, slowSteaming }) {
+  const port = PORT_BY_CODE[route.port_code];
+  if (!tracking || voyageDay <= 0 || !port) return null;
+
+  const sailingDays = route.sailing_days;
+  const day = Math.min(voyageDay, sailingDays);
+  const daysToEta = Math.max(0, sailingDays - day);
+  const queueDays = route.total_wait_days;
+  const dayRate = port.demurrage_day_usd;
+
+  let absorbed, status, detail, exposedDays;
+  if (slowSteaming && daysToEta >= queueDays) {
+    absorbed = true; status = "ABSORBED"; exposedDays = 0;
+    detail = "Virtual arrival covers the whole queue — no time at anchorage.";
+  } else if (slowSteaming) {
+    absorbed = false; status = "PARTIAL";
+    exposedDays = +(queueDays - daysToEta).toFixed(1);
+    detail = `Speed reduction runs out ${exposedDays.toFixed(1)} days short of the berth window — the ship queues for the remainder.`;
+  } else {
+    absorbed = false; status = "EXPOSED";
+    exposedDays = +Math.max(0, queueDays - FREE_LAYTIME_DAYS).toFixed(1);
+    detail = `Steaming full ahead into an unmitigated queue — everything past ${FREE_LAYTIME_DAYS.toFixed(0)} days free laytime is on demurrage.`;
+  }
+
+  return {
+    tracking: true, voyage_day: day, sailing_days: sailingDays, days_to_eta: daysToEta,
+    progress_pct: sailingDays ? +((day / sailingDays) * 100).toFixed(1) : 0,
+    supplier: route.supplier, port_short: route.port_short, vessel: vessel.name,
+    queue_days: +queueDays.toFixed(1), absorbable_days: daysToEta, exposed_days: exposedDays,
+    absorbed, status, status_detail: detail,
+    demurrage_risk_usd: Math.round(exposedDays * dayRate),
+    demurrage_day_usd: dayRate, slow_steaming: slowSteaming,
+  };
+}
+
+/** steel_engine._contract — the LTC vs spot ledger. */
+function contractFor({ spotRatioPct, spotVolume, ltcVolume, spotBest, ltcBest,
+                       spotInr, ltcInr, ltcDiscountInr, forecast }) {
+  const ltcRatioPct = 100 - spotRatioPct;
+  const bestDay = forecast.best_entry.day;
+  const fobDiscount = +((1 - LTC_FOB_FACTOR) * 100).toFixed(1);
+  const freightDiscount = +((1 - LTC_FREIGHT_FACTOR) * 100).toFixed(1);
+
+  return {
+    spot_ratio_pct: +spotRatioPct.toFixed(1),
+    ltc_ratio_pct: +ltcRatioPct.toFixed(1),
+    spot_volume_t: Math.round(spotVolume),
+    ltc_volume_t: Math.round(ltcVolume),
+    spot_inr: Math.round(spotInr), ltc_inr: Math.round(ltcInr),
+    spot_crore: +(spotInr / 1e7).toFixed(2), ltc_crore: +(ltcInr / 1e7).toFixed(2),
+    ltc_discount_inr: Math.round(ltcDiscountInr),
+    ltc_discount_crore: +(ltcDiscountInr / 1e7).toFixed(2),
+    fob_discount_pct: fobDiscount, freight_discount_pct: freightDiscount,
+    execution_day: bestDay,
+    execution_date: forecast.best_entry.date,
+    execution_label: `${forecast.best_entry.weekday}, ${forecast.best_entry.date}`,
+    ltc: {
+      title: "Long-term framework contracts",
+      volume_t: Math.round(ltcVolume), ratio_pct: +ltcRatioPct.toFixed(1),
+      routing: ltcBest ? `${ltcBest.supplier} → ${ltcBest.port_short}` : null,
+      landed_inr_per_t: ltcBest ? ltcBest.landed_ltc_inr_per_t : null,
+      pricing: `Quarterly index-linked benchmark with a negotiated ${fobDiscount.toFixed(1)}% volume discount on FOB and ${freightDiscount.toFixed(0)}% off the committed freight leg.`,
+      demurrage: "Supplier-backed priority discharge windows — near-zero exposure.",
+      rationale: "Blast furnace continuity and supply security.",
+    },
+    spot: {
+      title: "Spot auction bidding",
+      volume_t: Math.round(spotVolume), ratio_pct: +spotRatioPct.toFixed(1),
+      routing: spotBest ? `${spotBest.supplier} → ${spotBest.port_short}` : null,
+      landed_inr_per_t: spotBest ? spotBest.landed_inr_per_t : null,
+      pricing: "Live spot freight plus a dynamic vessel fixture auction, fired on the model's timing trigger.",
+      demurrage: "Carried by the plant — managed via virtual arrival.",
+      rationale: "Margin enhancement and freight arbitrage.",
+    },
+    comparison: [
+      { category: "Tonnage allocated", ltc: fmtMt(ltcVolume), spot: fmtMt(spotVolume) },
+      { category: "Allocation share", ltc: `${ltcRatioPct.toFixed(0)}%`, spot: `${spotRatioPct.toFixed(0)}%` },
+      { category: "Procurement rationale", ltc: "Blast furnace continuity & supply security", spot: "Margin enhancement & freight arbitrage" },
+      { category: "Execution trigger", ltc: "Quarterly / annual schedule", spot: `Dynamic ML window (day ${bestDay})` },
+      { category: "Port demurrage exposure", ltc: "Pre-booked priority berthing slots", spot: "Managed via virtual arrival / slow-steaming" },
+    ],
+  };
+}
+
+/** steel_engine.plan — same inputs, same dual-tier ledger, closed-form allocation. */
 export function steelPlan(body = {}) {
   const payload = body && typeof body === "object" ? body : {};
   const plant = PLANT_BY_ID[payload.plant] || PLANTS[0];
@@ -421,6 +569,14 @@ export function steelPlan(body = {}) {
   const crudeShock = clamp(numOr(payload.crude_shock_pct, 0), -30, 50);
   const portDelay = clamp(numOr(payload.port_delay_days, 0), 0, 8);
   const godown = clamp(numOr(payload.godown_rate_inr, plant.godown_rate_inr), 20, 120);
+
+  // PSU dual-tier split: the slider sets the spot share, LTC takes the rest.
+  const spotRatio = clamp(numOr(payload.spot_ratio_pct, DEFAULT_SPOT_RATIO_PCT), 0, 100);
+  const spotVolume = (volume * spotRatio) / 100;
+  const ltcVolume = volume - spotVolume;
+
+  const trackInTransit = payload.track_in_transit === undefined ? true : Boolean(payload.track_in_transit);
+  const voyageDay = Math.round(clamp(numOr(payload.voyage_day, DEFAULT_VOYAGE_DAY), 1, MAX_VOYAGE_DAY));
 
   const base = macroBaseline();
   const brent = base.brent_usd * (1 + crudeShock / 100);
@@ -432,11 +588,13 @@ export function steelPlan(body = {}) {
 
   const macro = {
     bdry: base.bdry, brent_usd: +brent.toFixed(2), vlsfo_usd_per_t: +vlsfo.toFixed(2),
-    usd_inr: +usdInr.toFixed(2), crude_shock_pct: crudeShock, as_of: base.as_of,
+    usd_inr: +usdInr.toFixed(2), crude_shock_pct: crudeShock,
+    crude_var_14d_pct: base.crude_var_14d_pct, as_of: base.as_of,
     source: base.source, is_live: false,
   };
   const inputs = { plant, vessel, volume_t: Math.round(volume), slow_steaming: slowSteaming,
-    port_delay_days: portDelay, godown_rate_inr: godown, macro };
+    port_delay_days: portDelay, godown_rate_inr: godown, spot_ratio_pct: spotRatio,
+    track_in_transit: trackInTransit, voyage_day: voyageDay, macro };
 
   const routes = [], infeasible = [];
   for (const supplier of SUPPLIERS) {
@@ -446,35 +604,61 @@ export function steelPlan(body = {}) {
       const row = {
         id: `${supplier.id}-${port.code}`, supplier: supplier.name, supplier_id: supplier.id,
         grade: supplier.grade, sailing_days: supplier.sailing_days, port: port.name,
-        port_short: port.short, port_code: port.code, allocated_t: 0, ...priced,
+        port_short: port.short, port_code: port.code, allocated_t: 0,
+        allocated_spot_t: 0, allocated_ltc_t: 0, ...priced,
       };
       (priced.feasible ? routes : infeasible).push(row);
     }
   }
   routes.sort((a, b) => a.landed_inr_per_t - b.landed_inr_per_t);
+  const cheapestLtc = routes.length
+    ? routes.reduce((a, r) => (r.landed_ltc_inr_per_t < a.landed_ltc_inr_per_t ? r : a))
+    : null;
   routes.forEach((r, i) => {
     r.rank = i + 1;
     r.premium_inr_per_t = +(r.landed_inr_per_t - routes[0].landed_inr_per_t).toFixed(2);
+    r.premium_ltc_inr_per_t = +(r.landed_ltc_inr_per_t - cheapestLtc.landed_ltc_inr_per_t).toFixed(2);
   });
 
   if (!routes.length) {
     return {
       ...inputs, feasible: false, routes: [], infeasible, allocation: null, ledger: null,
       allocation_split: [], solver: null, advisory: null, forecast,
+      contract: null, telemetry: null,
       tactical: { level: "critical", action: "NO FEASIBLE ROUTING",
         detail: `${vessel.name} cannot berth at any port serving ${plant.short}. Select a smaller vessel class.` },
     };
   }
 
-  const best = routes[0];
-  best.allocated_t = Math.round(volume);
+  // The LP's degenerate optimum: each quota to the cheapest routing on its own
+  // tier, and those need not be the same routing.
+  const spotBest = routes[0];
+  const ltcBest = cheapestLtc;
+  if (spotVolume > 0) spotBest.allocated_spot_t = Math.round(spotVolume);
+  if (ltcVolume > 0) ltcBest.allocated_ltc_t = Math.round(ltcVolume);
+  routes.forEach((r) => {
+    r.allocated_t = r.allocated_spot_t + r.allocated_ltc_t;
+    r.blended_inr_per_t = r.allocated_t
+      ? +((r.allocated_spot_t * r.landed_inr_per_t + r.allocated_ltc_t * r.landed_ltc_inr_per_t) / r.allocated_t).toFixed(2)
+      : null;
+  });
+
+  const best = routes.reduce((a, r) => (r.allocated_t > a.allocated_t ? r : a));
   const worst = routes[routes.length - 1];
-  const totalInr = best.landed_inr_per_t * volume;
+  const split = routes.filter((r) => r.allocated_t > 0);
+
+  const sum = (fn) => routes.reduce((a, r) => a + fn(r), 0);
+  const spotInr = sum((r) => r.landed_inr_per_t * r.allocated_spot_t);
+  const ltcInr = sum((r) => r.landed_ltc_inr_per_t * r.allocated_ltc_t);
+  const totalInr = spotInr + ltcInr;
+  const ltcDiscountInr = sum((r) => r.ltc_discount_inr_per_t * r.allocated_ltc_t);
   const baselineInr = worst.landed_inr_per_t * volume;
   const savingsInr = baselineInr - totalInr;
-  const bunkerSavedUsd = best.usd_components.bunker_saved * volume;
-  const demurragePaidUsd = best.usd_components.demurrage * volume;
-  const demurrageAvoidedUsd = best.demurrage_avoided_usd_per_t * volume;
+
+  // Demurrage touches the spot tranche only — LTC buys a berthing slot.
+  const bunkerSavedUsd = sum((r) => r.usd_components.bunker_saved * r.allocated_t);
+  const demurragePaidUsd = sum((r) => r.usd_components.demurrage * r.allocated_spot_t);
+  const demurrageAvoidedUsd = sum((r) => r.demurrage_avoided_usd_per_t * r.allocated_spot_t);
   const solver = "closed form (in-browser mirror)";
 
   const advisory = portDelay > 2
@@ -489,11 +673,17 @@ export function steelPlan(body = {}) {
     allocation: {
       supplier: best.supplier, grade: best.grade, port: best.port, port_short: best.port_short,
       vessel: vessel.name, volume_t: Math.round(volume), landed_inr_per_t: best.landed_inr_per_t,
+      landed_ltc_inr_per_t: best.landed_ltc_inr_per_t, blended_inr_per_t: best.blended_inr_per_t,
       ocean_usd_per_t: best.ocean_usd_per_t, rail_km: best.rail_km, sailing_days: best.sailing_days,
       queue_delay_days: best.queue_delay_days, breakdown: best.breakdown,
+      breakdown_ltc: best.breakdown_ltc,
     },
-    allocation_split: [{ id: best.id, supplier: best.supplier, port_short: best.port_short,
-      allocated_t: Math.round(volume), landed_inr_per_t: best.landed_inr_per_t }],
+    allocation_split: split.map((r) => ({
+      id: r.id, supplier: r.supplier, port_short: r.port_short, allocated_t: r.allocated_t,
+      allocated_spot_t: r.allocated_spot_t, allocated_ltc_t: r.allocated_ltc_t,
+      landed_inr_per_t: r.landed_inr_per_t, landed_ltc_inr_per_t: r.landed_ltc_inr_per_t,
+      blended_inr_per_t: r.blended_inr_per_t,
+    })),
     solver,
     routes, infeasible,
     ledger: {
@@ -502,13 +692,20 @@ export function steelPlan(body = {}) {
       baseline_inr_per_t: worst.landed_inr_per_t, baseline_crore: +(baselineInr / 1e7).toFixed(2),
       savings_inr: Math.round(savingsInr), savings_crore: +(savingsInr / 1e7).toFixed(2),
       savings_pct: baselineInr ? +((savingsInr / baselineInr) * 100).toFixed(2) : 0,
+      spot_inr: Math.round(spotInr), ltc_inr: Math.round(ltcInr),
+      ltc_discount_inr: Math.round(ltcDiscountInr),
+      ltc_discount_crore: +(ltcDiscountInr / 1e7).toFixed(2),
       bunker_saved_usd: Math.round(bunkerSavedUsd), demurrage_paid_usd: Math.round(demurragePaidUsd),
       demurrage_avoided_usd: Math.round(demurrageAvoidedUsd),
       parcels: Math.max(1, Math.ceil(volume / vessel.dwt)), solver,
     },
     advisory,
     forecast,
-    tactical: tactical(forecast),
+    contract: contractFor({ spotRatioPct: spotRatio, spotVolume, ltcVolume, spotBest:
+      spotVolume > 0 ? spotBest : null, ltcBest: ltcVolume > 0 ? ltcBest : null,
+      spotInr, ltcInr, ltcDiscountInr, forecast }),
+    telemetry: telemetryFor(best, vessel, { tracking: trackInTransit, voyageDay, slowSteaming }),
+    tactical: tactical(forecast, spotRatio, spotVolume),
   };
 }
 

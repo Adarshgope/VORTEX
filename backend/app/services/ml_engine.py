@@ -95,6 +95,21 @@ PORT_DELAY_RANGE = (0.0, 8.0)
 GODOWN_RANGE = (20.0, 120.0)
 CRUDE_SHOCK_RANGE = (-30.0, 50.0)
 
+# --- Empirical Brent Value-at-Risk ------------------------------------------
+# ML/app.py derives the *default* position of its crude-shock slider rather than
+# hard-coding one, reading a 14-day 95% VaR straight off the traded series:
+#
+#     daily_volatility = crude.pct_change().std()      # over a 3-month pull
+#     stat_var_14d_pct = 1.645 * daily_volatility * sqrt(14) * 100
+#
+# 1.645 is the one-tailed 95% normal quantile and sqrt(14) is the square-root-of-
+# time scaling to the 14-day horizon. Reproduced here on the same series the
+# forecast is scored against, so the slider opens on the market's own tail risk
+# instead of on zero.
+_VAR_Z = 1.645                # one-tailed 95% normal quantile
+_VAR_WINDOW = 63              # ~3 months of sessions — ML/app.py's period="3mo"
+_VAR_FALLBACK_PCT = 14.8      # ML/app.py's benchmark when the feed is offline
+
 
 # ---------------------------------------------------------------------------
 # Small numeric helpers (stdlib only)
@@ -472,6 +487,32 @@ def model_status():
     }
 
 
+def crude_var_pct():
+    """
+    14-day 95% Value-at-Risk on Brent, in percent, off the live series.
+
+    ML/app.py's `stat_var_14d_pct`. Returns its offline benchmark (14.8%) when
+    the series is too short or too flat to give a meaningful volatility, and is
+    clamped into the crude-shock slider's own band so it is always a position
+    that slider can actually open on.
+    """
+    _REGISTRY.ensure()
+    macro, _ = _REGISTRY.snapshot()
+    crude = macro["crude"][-(_VAR_WINDOW + 1):] if macro else []
+    returns = [crude[i] / crude[i - 1] - 1.0
+               for i in range(1, len(crude)) if crude[i - 1]]
+    if len(returns) < 20:
+        return _VAR_FALLBACK_PCT
+
+    mean = sum(returns) / len(returns)
+    variance = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+    daily_vol = math.sqrt(variance)
+    var_pct = _VAR_Z * daily_vol * math.sqrt(HORIZON) * 100.0
+    if not (var_pct > 0) or math.isinf(var_pct):
+        return _VAR_FALLBACK_PCT
+    return round(_clamp(var_pct, 0.0, CRUDE_SHOCK_RANGE[1]), 1)
+
+
 def macro_baseline():
     """Latest observed macro levels — what the metric tiles show."""
     _touch_live()
@@ -483,6 +524,8 @@ def macro_baseline():
         "as_of": m["dates"][-1],
         "source": m["source"],
         "is_live": bool(m.get("live")),
+        # ML/app.py's empirically derived crude-shock default.
+        "crude_var_14d_pct": crude_var_pct(),
     }
 
 

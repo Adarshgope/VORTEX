@@ -45,10 +45,13 @@ def plan():
         plant            rourkela | bokaro | vizag
         vessel           capesize | panamax | supramax
         volume_t         10000 .. 500000
-        crude_shock_pct  -30 .. 50
+        spot_ratio_pct   0 .. 100     spot auction share; LTC takes the rest
+        crude_shock_pct  -30 .. 50    defaults to the live 14-day 95% Brent VaR
         port_delay_days  0 .. 8       simulated port congestion spike
         godown_rate_inr  20 .. 120    plant stockyard rate (defaults per plant)
         slow_steaming    true | false
+        track_in_transit true | false mid-voyage telemetry for the chosen routing
+        voyage_day       1 .. 20      days already elapsed on that passage
     """
     payload, error = _json_body()
     if error:

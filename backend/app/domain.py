@@ -140,6 +140,22 @@ VLSFO_CRUDE_PARITY = 7.33
 # Laytime allowed before demurrage starts running, in days.
 FREE_LAYTIME_DAYS = 2.0
 
+# ---------------------------------------------------------------------------
+# PSU dual-tier procurement framework.
+#
+# SAIL and RINL buy on two tiers at once: a long-term framework contract (LTC)
+# that carries the baseload and protects blast-furnace continuity, and spot
+# auction tenders that chase freight dips. ML/app.py prices the LTC leg as a
+# negotiated discount on the same stack — 4.5% off FOB and 4% off ocean freight
+# for the committed volume — and with no demurrage or extra charter hire at all,
+# because the framework buys pre-booked priority berthing slots and the supplier
+# carries the discharge window.
+# ---------------------------------------------------------------------------
+
+LTC_FOB_FACTOR = 0.955          # 4.5% long-term volume discount on FOB cargo
+LTC_FREIGHT_FACTOR = 0.96       # 4% off the ocean freight leg on committed tonnage
+DEFAULT_SPOT_RATIO_PCT = 30     # the PSU standard 70:30 LTC:spot split
+
 PORT_BY_CODE = {p["code"]: p for p in PORTS}
 PLANT_BY_ID = {p["id"]: p for p in PLANTS}
 VESSEL_BY_ID = {v["id"]: v for v in VESSELS}

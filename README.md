@@ -116,16 +116,18 @@ skips the choreography and renders the final composition.
 
 ### Module 2 — Sourcing dashboard
 
-One screen, no tab stack: controls on the left, the decision on the right.
+Controls on the left, the decision on the right across four tabs.
 
 | Region | Contents |
 |---|---|
-| **Control rail** | `ML/app.py`'s sidebar, control for control: destination steel plant (SAIL Rourkela / SAIL Bokaro / RINL Vizag), order volume, vessel class, the three stress-test sliders (Brent crude shock %, simulated port congestion spike in days, plant godown rate ₹/MT) and the Virtual Arrival toggle. BDRY, Brent, VLSFO and USD/INR are live readings, not inputs |
-| **Tactical banner** | The procurement call — ADVANCE SPOT CHARTER BOOKINGS above a +2% projected move, STAGGER CHARTER CONTRACTS otherwise: `ML/app.py`'s two states on its threshold |
+| **Control rail** | `ML/app.py`'s sidebar, control for control: destination steel plant (SAIL Rourkela / SAIL Bokaro / RINL Vizag), order volume, the spot/LTC policy split, vessel class, the three stress-test sliders (Brent crude shock %, simulated port congestion spike in days, plant godown rate ₹/MT), the Virtual Arrival toggle and the mid-voyage telemetry controls. BDRY, Brent, VLSFO and USD/INR are live readings, not inputs |
+| **Tactical banner** | The procurement call — ADVANCE SPOT CHARTER BOOKINGS above a +2% projected move, STAGGER SPOT CHARTER CONTRACTS otherwise: `ML/app.py`'s two states on its threshold, each naming the spot tranche it applies to |
 | **Metrics bar** | Live BDRY with its 14-day target, Brent crude $/bbl, VLSFO bunker $/MT, USD/INR |
-| **Optimal sourcing plan** | Every feasible origin × discharge-port routing, ranked and priced to the plant: supplier origin, discharge port, allocated volume, ocean / port / FOIS rail legs, landed ₹/MT, premium over rank 1 |
+| **Optimal sourcing plan** | Every feasible origin × discharge-port routing, ranked and priced to the plant on both tiers: supplier origin, discharge port, the LTC and spot tonnage it won, ocean and FOIS rail legs, spot ₹/MT, LTC ₹/MT, premium over rank 1 |
+| **Mid-voyage telemetry** | `ML/app.py`'s in-transit card for the allocated routing: passage progress, days to ETA, the queue at the discharge port, how much of it slowing down can still absorb, and the demurrage exposed if it cannot |
+| **LTC vs spot ledger** | The dual-tier split: tonnage, spend and routing per tier, the framework's pricing and berthing terms, what the LTC discount is worth, and the side-by-side comparison table |
 | **Multi-modal cost stack** | The allocated routing split into FOB, ocean freight, grade adjustment, port handling, demurrage, rail and godown, in ₹/MT |
-| **Financial ledger** | Procurement budget in ₹ crores and average landed cost; fuel saved and demurrage eliminated under Virtual Arrival, or demurrage paid without it; the mid-voyage advisory once a congestion spike passes two days |
+| **Financial ledger** | Procurement budget in ₹ crores and average landed cost, split across the framework and spot tranches; fuel saved and demurrage eliminated under Virtual Arrival, or demurrage paid without it; the mid-voyage advisory once a congestion spike passes two days |
 | **Freight index forecast** | `ML/app.py`'s 14-day tactical engine: realised BDRY flowing into the forward curve, the optimal charter window, its four timing metrics and the day-by-day procurement schedule with green / amber / red signals |
 
 Slider moves re-post the whole scenario, so every panel updates together.
@@ -140,8 +142,8 @@ app adds the headers itself.
 | Method | Route | Purpose |
 |---|---|---|
 | GET | `/api/health` | Service, database and ML model status |
-| GET | `/api/steel/options` | Plants, ports, vessel classes, origins, macro baseline, slider ranges |
-| POST | `/api/steel/plan` | **The optimiser** — ranked routings, allocation, ledger and forecast |
+| GET | `/api/steel/options` | Plants, ports, vessel classes, origins, macro baseline, contract terms, slider ranges |
+| POST | `/api/steel/plan` | **The optimiser** — ranked routings, dual-tier allocation, contract ledger, mid-voyage telemetry, financial ledger and forecast |
 | POST | `/api/predict/freight` | **ML** 14-day BDRY forecast: forward curve, optimal booking day, day-by-day signals |
 | GET | `/api/predict/freight` | Same forecast from a query string — `?crude_shock_pct=10&port_delay_days=2` |
 | GET | `/api/predict/status` | Model health, feature list and live-feed state |
@@ -151,26 +153,37 @@ app adds the headers itself.
 
 ### The sourcing optimiser
 
-`ML/app.py` states the allocation as
+A PSU does not buy one way. SAIL and RINL run a dual-tier framework — a long-term
+contract (LTC) carrying the baseload so the blast furnaces never run dry, and
+spot auction tenders chasing freight dips with the balance — so `ML/app.py`
+splits the order on an operator-set ratio (70:30 LTC:spot by default) and
+allocates both tiers in one program:
 
 ```
-minimise  sum_r  x_r * landed_cost_r
-s.t.      sum_r  x_r = demand,   x_r >= 0
+minimise  sum_r  x_spot_r * spot_cost_r  +  x_ltc_r * ltc_cost_r
+s.t.      sum_r  x_spot_r == demand * spot_ratio
+          sum_r  x_ltc_r  == demand * (1 - spot_ratio)
+          x_spot_r, x_ltc_r >= 0
 ```
 
 with no per-route capacity. `steel_engine.py` hands that exact program to PuLP's
 CBC solver, so the allocation is a real LP solve rather than an imitation of one,
 and `ledger.solver` records which engine answered.
 
-The program is degenerate — with no capacity ceiling the optimum puts the whole
-requirement on the single cheapest feasible routing — so the closed form agrees
-with CBC to the tonne. It is kept as the fallback for an environment without
-PuLP, and the two were checked against each other across 162 feasible scenarios
-(3 plants × 3 vessel classes × 3 volumes × 3 crude shocks × both steaming modes)
-with zero disagreement. Every rejected routing is still priced and ranked, so the
-desk sees what was passed over and by how much.
+The program is degenerate — with no capacity ceiling each quota goes wholly to
+the cheapest feasible routing on its own tier — so the closed form agrees with
+CBC to the tonne, and it is kept as the fallback for an environment without PuLP.
+The two were checked against each other across 2,160 feasible scenarios (3 plants
+× 3 vessel classes × 3 volumes × 4 crude shocks × 5 spot/LTC ratios × both
+steaming modes × two congestion levels) with zero disagreement. The two tiers
+need not pick the same routing: the LTC stack drops exactly the
+demurrage and charter-hire terms that separate one port's queue from another's,
+so a berth that spot pricing rejects for its anchorage backlog can still be the
+right home for framework tonnage. Every rejected routing is still priced on both
+tiers and ranked, so the desk sees what was passed over and by how much.
 
-Cost stack, per tonne:
+Cost stack, per tonne. Spot tier — full market exposure, and the queue is the
+buyer's problem:
 
 ```
   FOB cargo
@@ -186,6 +199,21 @@ Cost stack, per tonne:
 = landed INR/t
 ```
 
+LTC tier — the framework's negotiated terms on committed tonnage:
+
+```
+  FOB cargo x 0.955    4.5% long-term volume discount
++ ocean freight x 0.96 4% off the committed leg
++ coal grade adjustment
++ port tariff
+- bunker saved         still earned when slow-steaming
+= ocean USD/t  ->  the same rail and godown legs
+```
+
+with no demurrage and no extra charter hire at all: the framework buys pre-booked
+priority berthing slots, so the supplier carries the discharge window rather than
+the plant.
+
 Feasibility is a hard gate on vessel draft against berth draft and on DWT against
 the port's maximum call size — which is why Capesize clears only Dhamra and
 Vizag, and Haldia's river draft accepts nothing above Supramax.
@@ -194,6 +222,22 @@ Vizag, and Haldia's river draft accepts nothing above Supramax.
 pays demurrage at the port's day rate spread over the parcel, while slow-steaming
 pays extra charter hire instead but saves the bunker difference across the whole
 passage. The ledger prices the plan both ways and reports the delta.
+
+**Mid-voyage telemetry** reads the allocated routing as a parcel already at sea.
+A vessel `voyage_day` days out has `sailing_days - voyage_day` days of passage
+left, and that is the entire budget virtual arrival has to spend: slowing down
+can soak up a queue only up to that many days. Past it she arrives before the
+berth frees whatever she does, and the remainder is time at anchorage on
+demurrage — which is why the card can read *absorbed*, *partially absorbed* or
+*exposed* on the same routing depending on how far along she already is.
+
+**The crude-shock slider opens on the market's own tail risk.** Rather than
+defaulting to zero, `ML/app.py` derives a 14-day 95% Value-at-Risk straight off
+the traded Brent series — `1.645 * daily_volatility * sqrt(14)`, the one-tailed
+95% normal quantile scaled by root-time — and seeds the slider with it, so the
+first view a desk gets is already a stress test sized by live volatility.
+`ml_engine.crude_var_pct()` reproduces that on the same series the forecast is
+scored against.
 
 ### The trained freight models
 

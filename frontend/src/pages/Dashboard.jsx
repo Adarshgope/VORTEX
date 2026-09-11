@@ -20,6 +20,8 @@ import {
 import ControlPanel from "../components/dashboard/ControlPanel";
 import MetricsBar, { TacticalBanner } from "../components/dashboard/MetricsBar";
 import SourcingPlan from "../components/dashboard/SourcingPlan";
+import Telemetry from "../components/dashboard/Telemetry";
+import ContractLedger from "../components/dashboard/ContractLedger";
 import CostBreakdown from "../components/dashboard/CostBreakdown";
 import Ledger from "../components/dashboard/Ledger";
 import ForecastPanel from "../components/dashboard/ForecastPanel";
@@ -32,16 +34,20 @@ const SEED = {
   plant: "rourkela",
   vessel: "capesize",
   volume_t: 150000,
+  spot_ratio_pct: 30,
   crude_shock_pct: 0,
   port_delay_days: 0,
   godown_rate_inr: 48,
   slow_steaming: true,
+  track_in_transit: true,
+  voyage_day: 4,
   godown_touched: false,
 };
 
-/** The three result views. Order is the order they are read in. */
+/** The four result views. Order is the order they are read in. */
 const TABS = [
   { id: "sourcing", label: "Optimal Sourcing Plan" },
+  { id: "contract", label: "LTC vs Spot Ledger" },
   { id: "cost", label: "Multi-Modal Cost Stack" },
   { id: "forecast", label: "Freight Index Forecast" },
 ];
@@ -74,10 +80,13 @@ export default function Dashboard() {
       plant: scenario.plant,
       vessel: scenario.vessel,
       volume_t: scenario.volume_t === "" ? 10000 : scenario.volume_t,
+      spot_ratio_pct: scenario.spot_ratio_pct,
       crude_shock_pct: scenario.crude_shock_pct,
       port_delay_days: scenario.port_delay_days,
       godown_rate_inr: scenario.godown_rate_inr,
       slow_steaming: scenario.slow_steaming,
+      track_in_transit: scenario.track_in_transit,
+      voyage_day: scenario.voyage_day,
     }),
     [scenario]
   );
@@ -318,8 +327,20 @@ export default function Dashboard() {
             </div>
 
             {tab === "sourcing" && (
-              <div id="panel-sourcing" role="tabpanel" aria-labelledby="tab-sourcing">
+              <div
+                id="panel-sourcing"
+                role="tabpanel"
+                aria-labelledby="tab-sourcing"
+                className="space-y-5"
+              >
                 <SourcingPlan plan={plan} source={source} error={planError} onRetry={refreshPlan} />
+                <Telemetry plan={plan} />
+              </div>
+            )}
+
+            {tab === "contract" && (
+              <div id="panel-contract" role="tabpanel" aria-labelledby="tab-contract">
+                <ContractLedger plan={plan} error={planError} onRetry={refreshPlan} />
               </div>
             )}
 

@@ -1,6 +1,7 @@
 /**
  * Financial ledger — ML/app.py's "Financial Ledger" column: the procurement
- * budget in crores, the average landed cost, and the Virtual Arrival line —
+ * budget in crores, the average landed cost, how it splits across the framework
+ * and spot tranches, and the Virtual Arrival line —
  * fuel saved and demurrage eliminated when slow-steaming, demurrage paid when
  * not — plus its mid-voyage advisory once a congestion spike is dialled in.
  */
@@ -21,6 +22,7 @@ export default function Ledger({ plan, error, onRetry }) {
     );
   }
 
+  const contract = plan.contract;
   const rows = [
     ["Costliest feasible routing", inr(ledger.baseline_inr_per_t, 0)],
     ["Saved against it", `${crore(ledger.savings_crore)} · ${num(ledger.savings_pct, 1)}%`],
@@ -53,6 +55,41 @@ export default function Ledger({ plan, error, onRetry }) {
           <p className="mt-1.5 text-[10.5px] text-blue-200/45">per MT at the plant stockyard</p>
         </div>
       </div>
+
+      {contract && (
+        <div className="mt-3 rounded-xl border border-blue-500/15 bg-[#02060f]/40 p-3">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-blue-200/60">
+            Split across the procurement tiers
+          </p>
+          <div className="mt-2 flex h-2 w-full overflow-hidden rounded-full bg-white/5">
+            <div
+              className="bg-gradient-to-r from-sky-600 to-sky-400"
+              style={{ width: `${contract.ltc_ratio_pct}%` }}
+            />
+            <div
+              className="bg-gradient-to-r from-yellow-300 to-amber-500"
+              style={{ width: `${contract.spot_ratio_pct}%` }}
+            />
+          </div>
+          <div className="mt-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 text-[11px]">
+            <span className="text-sky-300/85">
+              LTC {crore(contract.ltc_crore)}{" "}
+              <span className="text-blue-200/40">· {num(contract.ltc_ratio_pct, 0)}%</span>
+            </span>
+            <span className="text-amber-300/85">
+              Spot {crore(contract.spot_crore)}{" "}
+              <span className="text-blue-200/40">· {num(contract.spot_ratio_pct, 0)}%</span>
+            </span>
+          </div>
+          {contract.ltc_discount_inr > 0 && (
+            <p className="mt-2 text-[11px] leading-relaxed text-blue-100/65">
+              Framework terms are worth{" "}
+              <span className="font-semibold text-sky-300">{crore(contract.ltc_discount_crore)}</span>{" "}
+              against buying the same tonnage at spot.
+            </p>
+          )}
+        </div>
+      )}
 
       {plan.slow_steaming ? (
         <div className="mt-3 rounded-xl border border-emerald-500/25 bg-emerald-500/8 p-3">

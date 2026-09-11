@@ -2,10 +2,11 @@
  * Optimal sourcing plan.
  *
  * Every origin x discharge-port routing the selected vessel can physically work,
- * priced to the plant stockyard and ranked. The optimiser puts the whole order on
- * the cheapest one, so that row carries the allocation; the rest show what they
- * would have cost. Ocean / port / rail sit in their own columns, which is the
- * multi-modal breakdown read across instead of stacked.
+ * priced to the plant stockyard on both procurement tiers and ranked. Each
+ * tranche — framework contract and spot auction — goes wholly to the cheapest
+ * routing on its own terms, so one or two rows carry the allocation and the rest
+ * show what they would have cost. Ocean / port / rail sit in their own columns,
+ * which is the multi-modal breakdown read across instead of stacked.
  */
 
 import { Ship } from "lucide-react";
@@ -21,7 +22,7 @@ export default function SourcingPlan({ plan, source, error, onRetry }) {
       title="Optimal Sourcing Plan"
       subtitle={
         plan?.allocation
-          ? `${plan.volume_t.toLocaleString("en-IN")} MT to ${plan.plant.short} · ${plan.vessel.name} · ${plan.ledger.parcels} parcel${plan.ledger.parcels > 1 ? "s" : ""}`
+          ? `${plan.volume_t.toLocaleString("en-IN")} MT to ${plan.plant.short} · ${plan.vessel.name} · ${plan.contract.ltc_ratio_pct}/${plan.contract.spot_ratio_pct} LTC:spot · ${plan.ledger.parcels} parcel${plan.ledger.parcels > 1 ? "s" : ""}`
           : "Ranking every feasible routing"
       }
       action={<SourceChip source={source} />}
@@ -49,8 +50,8 @@ export default function SourcingPlan({ plan, source, error, onRetry }) {
             <table className="w-full border-collapse text-left">
               <thead>
                 <tr className="text-[10px] uppercase tracking-wider text-blue-200/45">
-                  {["", "Supplier origin", "Discharge port", "Volume",
-                    "Ocean", "Port", "FOIS rail", "Landed ₹/MT", "vs best"].map((h) => (
+                  {["", "Supplier origin", "Discharge port", "Allocated",
+                    "Ocean", "FOIS rail", "Spot ₹/MT", "LTC ₹/MT", "vs best"].map((h) => (
                     <th key={h} className="whitespace-nowrap px-4 py-2.5 font-semibold">
                       {h}
                     </th>
@@ -88,8 +89,23 @@ export default function SourcingPlan({ plan, source, error, onRetry }) {
                       </td>
                       <td className="whitespace-nowrap px-4 py-2.5">
                         {chosen ? (
-                          <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-400/15 px-2 py-0.5 font-mono text-[11px] font-bold text-amber-300">
-                            {r.allocated_t.toLocaleString("en-IN")}
+                          <span className="flex flex-wrap gap-1">
+                            {r.allocated_ltc_t > 0 && (
+                              <span
+                                title="Long-term framework contract"
+                                className="inline-flex items-center gap-1 rounded-full bg-sky-500/15 px-2 py-0.5 font-mono text-[10.5px] font-bold text-sky-300"
+                              >
+                                LTC {r.allocated_ltc_t.toLocaleString("en-IN")}
+                              </span>
+                            )}
+                            {r.allocated_spot_t > 0 && (
+                              <span
+                                title="Spot auction tender"
+                                className="inline-flex items-center gap-1 rounded-full bg-amber-400/15 px-2 py-0.5 font-mono text-[10.5px] font-bold text-amber-300"
+                              >
+                                Spot {r.allocated_spot_t.toLocaleString("en-IN")}
+                              </span>
+                            )}
                           </span>
                         ) : (
                           <span className="font-mono text-[11px] text-blue-200/25">—</span>
@@ -99,17 +115,21 @@ export default function SourcingPlan({ plan, source, error, onRetry }) {
                         {usd(r.usd_components.freight, 2)}
                       </td>
                       <td className="whitespace-nowrap px-4 py-2.5 font-mono text-[11px] text-blue-100/65">
-                        {usd(r.usd_components.tariff, 2)}
-                      </td>
-                      <td className="whitespace-nowrap px-4 py-2.5 font-mono text-[11px] text-blue-100/65">
                         {inr(r.breakdown.rail_fois, 0)}
                       </td>
                       <td
                         className={`whitespace-nowrap px-4 py-2.5 font-mono text-[12px] font-bold ${
-                          chosen ? "text-amber-300" : "text-white"
+                          r.allocated_spot_t > 0 ? "text-amber-300" : "text-white"
                         }`}
                       >
                         {inr(r.landed_inr_per_t, 0)}
+                      </td>
+                      <td
+                        className={`whitespace-nowrap px-4 py-2.5 font-mono text-[12px] font-bold ${
+                          r.allocated_ltc_t > 0 ? "text-sky-300" : "text-blue-100/70"
+                        }`}
+                      >
+                        {inr(r.landed_ltc_inr_per_t, 0)}
                       </td>
                       <td className="whitespace-nowrap px-4 py-2.5 font-mono text-[11px] text-blue-200/45">
                         {r.premium_inr_per_t > 0 ? `+${inr(r.premium_inr_per_t, 0)}` : "—"}
@@ -122,9 +142,11 @@ export default function SourcingPlan({ plan, source, error, onRetry }) {
           </div>
 
           <p className="border-t border-blue-500/10 px-4 py-2.5 text-[10.5px] leading-relaxed text-blue-200/40">
-            Ocean and port are USD/MT before conversion at ₹{num(plan.macro.usd_inr, 2)};
-            rail is the published FOIS rate. The whole order goes to rank 1 — the
-            LP has no per-port capacity limit, so its optimum is a single routing.
+            Ocean is USD/MT before conversion at ₹{num(plan.macro.usd_inr, 2)}; rail is the
+            published FOIS rate. Rank is on the spot stack. Each tranche goes wholly to
+            the cheapest routing on its own terms — the LP has no per-port capacity limit —
+            and the two can differ, since LTC pricing drops the demurrage and charter
+            hire that separate the ports' queues.
             {infeasible.length > 0 && (
               <>
                 {" "}
